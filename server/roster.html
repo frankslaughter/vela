@@ -103,7 +103,7 @@ function paint() {
     const id = li.dataset.id;
     const speaking = talking.has(id) && !li.classList.contains("is-muted");
     li.classList.toggle("is-speaking", speaking);
-    li.querySelector(".state").textContent = speaking ? "Talking" : (li.classList.contains("is-muted") ? "Muted" : "Live");
+    li.querySelector(".state").textContent = speaking ? "Talking" : li.dataset.state;
     li.querySelector(".spoke").textContent =
       speaking ? "Talking now" : (lastSpoke[id] ? "Last heard " + ago(lastSpoke[id]) : (listening ? "Not heard yet" : ""));
   }
@@ -160,12 +160,13 @@ async function refresh() {
         total += 1;
         const li = el("li", p.muted ? "is-muted" : "");
         li.dataset.id = p.identity;
+        li.dataset.state = p.headset_muted ? "Muted on headset" : (p.muted ? "Muted" : "Live");
         const bars = el("span", "bars");
         bars.append(el("i"), el("i"), el("i"));
         const who = el("span", "who");
         who.append(el("span", "name", p.name), el("span", "spoke"));
         li.append(el("span", "dot"), bars, who,
-                  el("span", "state", p.muted ? "Muted" : "Live"),
+                  el("span", "state", li.dataset.state),
                   el("span", "since", since(p.joined_at)));
         ul.append(li);
       }

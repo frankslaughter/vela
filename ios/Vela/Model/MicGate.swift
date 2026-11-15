@@ -22,12 +22,49 @@ final class MicGate: NSObject, AudioCustomProcessingDelegate, @unchecked Sendabl
         var voxHangover: Double = 0.4
     }
 
+    /// How many 10 ms blocks fell in each level band since the last report. For the log:
+    /// it shows how far apart a muted headset and a quiet live one really are.
+    struct Histogram: Sendable {
+        /// Upper edges in dBFS of all bands but the last, which is everything louder.
+        static let edges: [Float] = [-100, -95, -90, -85, -80, -75]
+        var counts = (0, 0, 0, 0, 0, 0, 0)
+
+        mutating func add(_ levelDB: Float) {
+            if levelDB <= -100 { counts.0 += 1 }
+            else if levelDB <= -95 { counts.1 += 1 }
+            else if levelDB <= -90 { counts.2 += 1 }
+            else if levelDB <= -85 { counts.3 += 1 }
+            else if levelDB <= -80 { counts.4 += 1 }
+            else if levelDB <= -75 { counts.5 += 1 }
+            else { counts.6 += 1 }
+        }
+
+        mutating func add(_ other: Histogram) {
+            counts.0 += other.counts.0; counts.1 += other.counts.1; counts.2 += other.counts.2
+            counts.3 += other.counts.3; counts.4 += other.counts.4; counts.5 += other.counts.5
+            counts.6 += other.counts.6
+        }
+
+        var text: String {
+            "to -100: \(counts.0), to -95: \(counts.1), to -90: \(counts.2), to -85: \(counts.3), "
+                + "to -80: \(counts.4), to -75: \(counts.5), louder: \(counts.6)"
+        }
+    }
+
+    /// A headset muted on its own boom is not always perfectly silent: measured on the
+    /// OpenComm2 on 2026-11-15, it usually leaves a hiss around -90 to -96 dB, while the same
+    /// headset live in a quiet room never fell below about -81 dB. This level sits between.
+    static let faintLevelDB: Float = -86
+
     struct Report: Sendable {
         /// Loudest 10 ms block since the last report, in dBFS. -120 is the floor.
         var levelDB: Float
         var isOpen: Bool
         /// How long the microphone has delivered nothing but digital silence.
         var silentSeconds: Double
+        /// How long every block has been at or below `faintLevelDB`.
+        var faintSeconds: Double
+        var histogram: Histogram
     }
 
     /// Called about five times a second, on the audio thread.
@@ -38,6 +75,8 @@ final class MicGate: NSObject, AudioCustomProcessingDelegate, @unchecked Sendabl
     private var sampleRate: Double = 48000
     private var hangoverLeft: Double = 0
     private var silentSeconds: Double = 0
+    private var faintSeconds: Double = 0
+    private var histogram = Histogram()
     private var windowPeakDB: Float = -120
     private var sinceReport: Double = 0
 
@@ -54,6 +93,7 @@ final class MicGate: NSObject, AudioCustomProcessingDelegate, @unchecked Sendabl
         sampleRate = Double(max(sampleRateHz, 8000))
         hangoverLeft = 0
         silentSeconds = 0
+        faintSeconds = 0
         lock.unlock()
     }
 
@@ -81,7 +121,10 @@ final class MicGate: NSObject, AudioCustomProcessingDelegate, @unchecked Sendabl
         let current = settings
 
         // One count either way is the smallest step a 16-bit sample can take. Below two is silence.
-        silentSeconds = peak < 2 ? silentSeconds + duration : 0
+        // Time spent muted in the app does not count: that silence is ours, not the microphone's.
+        silentSeconds = (peak < 2 && !current.isMuted) ? silentSeconds + duration : 0
+        faintSeconds = (levelDB <= Self.faintLevelDB && !current.isMuted) ? faintSeconds + duration : 0
+        if !current.isMuted { histogram.add(levelDB) }
 
         let isOpen: Bool
         if current.isMuted {
@@ -110,7 +153,9 @@ final class MicGate: NSObject, AudioCustomProcessingDelegate, @unchecked Sendabl
         sinceReport += duration
         var report: Report?
         if sinceReport >= 0.2 {
-            report = Report(levelDB: windowPeakDB, isOpen: isOpen, silentSeconds: silentSeconds)
+            report = Report(levelDB: windowPeakDB, isOpen: isOpen, silentSeconds: silentSeconds,
+                            faintSeconds: faintSeconds, histogram: histogram)
+            histogram = Histogram()
             windowPeakDB = -120
             sinceReport = 0
         }

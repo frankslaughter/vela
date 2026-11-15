@@ -243,7 +243,8 @@ async def join(body: JoinRequest, request: Request) -> dict:
         api.AccessToken(SETTINGS["api_key"], SETTINGS["api_secret"])
         .with_identity(body.device_id)
         .with_name(name)
-        .with_grants(api.VideoGrants(room_join=True, room=channel))
+        # A phone sets its own attributes to report a mute made on the headset itself.
+        .with_grants(api.VideoGrants(room_join=True, room=channel, can_update_own_metadata=True))
         .with_ttl(TOKEN_LIFETIME)
         .to_jwt()
     )
@@ -273,12 +274,15 @@ async def channel_roster(lk: api.LiveKitAPI, channel: str) -> list[dict]:
         if p.identity == MONITOR_IDENTITY or p.permission.hidden:
             continue  # our own listening seat
         mics = [t for t in p.tracks if t.source == api.TrackSource.MICROPHONE]
+        # The phone's own report that the headset is sending silence: a mute on its boom.
+        headset_muted = p.attributes.get("mic") == "headset-muted"
         people.append(
             {
                 "identity": p.identity,
                 "name": p.name or p.identity,
                 # No published mic counts as muted: nothing of theirs can be heard.
-                "muted": not mics or all(t.muted for t in mics),
+                "muted": headset_muted or not mics or all(t.muted for t in mics),
+                "headset_muted": headset_muted,
                 "joined_at": p.joined_at,
                 "speaking": p.identity in monitor.speaking,
                 "last_spoke": monitor.last_spoke.get(p.identity),

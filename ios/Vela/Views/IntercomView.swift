@@ -105,6 +105,9 @@ private struct MuteButton: View {
         if intercom.isMicUnavailable {
             return Look(title: "MIC OFF", hint: "Listening only. Tap to try the microphone again", symbol: "mic.slash.fill", color: Theme.idle)
         }
+        if intercom.isHeadsetMuted {
+            return Look(title: "MUTED", hint: "On the headset. Press its mute button to talk", symbol: "mic.slash.fill", color: Theme.muted)
+        }
         switch intercom.mode {
         case .ptt:
             return intercom.isTalking

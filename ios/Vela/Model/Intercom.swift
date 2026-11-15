@@ -23,7 +23,7 @@ enum Notice: Equatable {
     var text: String {
         switch self {
         case .youreMuted: "You're muted"
-        case .deadMic: "Your microphone is sending silence. Check the mute button on the headset boom."
+        case .deadMic: "Your microphone is sending silence. Check that it is working."
         case .headsetGone: "Headset disconnected. You have been muted."
         case .micUnavailable: "Listening only. Your microphone has not started. Tap the big button to try again."
         }
@@ -67,6 +67,9 @@ final class Intercom: NSObject, ObservableObject {
     /// On the boat and listening, but iOS would not start the microphone.
     /// It refuses when the app is not on screen and has no audio already running.
     @Published private(set) var isMicUnavailable = false
+    /// The headset is sending pure silence, which is what a mute button on its boom does.
+    /// The phone is never told about that mute, so it is inferred, and treated as a real one.
+    @Published private(set) var isHeadsetMuted = false
     @Published private(set) var talkers: [Talker] = []
     @Published private(set) var notice: Notice?
     /// Why the last join failed, or that the boat was lost.
@@ -82,7 +85,7 @@ final class Intercom: NSObject, ObservableObject {
     let meter = MicMeter()
 
     /// True when nothing of yours can be heard: muted, or in PTT and not talking.
-    var isSilent: Bool { isMicUnavailable || (mode == .ptt ? !isTalking : isMuted) }
+    var isSilent: Bool { isMicUnavailable || isHeadsetMuted || (mode == .ptt ? !isTalking : isMuted) }
 
     private let room = Room()
     private let browser = BoatBrowser()
@@ -105,6 +108,13 @@ final class Intercom: NSObject, ObservableObject {
     private var isTalkHeld = false
     private var isTalkLatched = false
     private var mutedSpeechSince: Date?
+    /// Microphone level over the last half minute, for the log.
+    private var levelFloorDB: Float = 0
+    private var levelPeakDB: Float = -120
+    private var levelLongestSilence: Double = 0
+    private var levelHistogram = MicGate.Histogram()
+    private var levelMutedReports = 0
+    private var levelWindowStart = Date()
     private var lastReminder = Date.distantPast
     private var mutedBeforeInterruption: Bool?
     private var noticeTask: Task<Void, Never>?
@@ -234,6 +244,7 @@ final class Intercom: NSObject, ObservableObject {
         currentBoat = nil
         talkers = []
         isMicUnavailable = false
+        isHeadsetMuted = false
         Task {
             await room.disconnect()
             try? await AudioManager.shared.setRecordingAlwaysPreparedMode(false)
@@ -242,6 +253,11 @@ final class Intercom: NSObject, ObservableObject {
     }
 
     func toggleMute() {
+        // Nothing the app does can unmute a headset. Say so, and do not stack a second mute on top.
+        if isHeadsetMuted, !isMuted {
+            tones.say("Muted on the headset", after: .reminder)
+            return
+        }
         setMuted(!isMuted)
     }
 
@@ -482,14 +498,78 @@ final class Intercom: NSObject, ObservableObject {
         meter.levelDB = report.levelDB
         meter.isGateOpen = report.isOpen
 
-        // A headset muted on its own boom sends pure silence, and the phone is never told.
-        let looksDead = report.silentSeconds >= 5 && !isMuted && phase == .connected
+        logLevels(report)
+
+        // A headset muted on its own boom sends next to nothing, and the phone is never told.
+        // A second and a half below the faint level on a headset microphone is taken as that
+        // mute. It ends at the first block clearly above it; the gap between the two levels
+        // keeps a stray click from flipping the state. On any other microphone, pure silence
+        // is a fault to warn about.
+        let isLive = !isMuted && !isMicUnavailable && phase == .connected
+        if isHeadsetMuted {
+            if !isLive || report.levelDB > MicGate.faintLevelDB + 6 { setHeadsetMuted(false) }
+        } else if isLive, report.faintSeconds >= 1.5, isOnHeadsetMicrophone {
+            setHeadsetMuted(true)
+        }
+
+        let looksDead = isLive && !isHeadsetMuted && report.silentSeconds >= 5
         if looksDead, notice == nil {
             notice = .deadMic
             tones.play(.warning)
         } else if !looksDead, notice == .deadMic {
             notice = nil
         }
+    }
+
+    private var isOnHeadsetMicrophone: Bool {
+        #if targetEnvironment(simulator)
+        // `-pretendHeadset YES` rehearses a muted headset: with no audio device, every microphone is silent.
+        if UserDefaults.standard.bool(forKey: "pretendHeadset") { return true }
+        #endif
+        return AVAudioSession.sharedInstance().currentRoute.inputs.contains { $0.portType == .bluetoothHFP }
+    }
+
+    private func setHeadsetMuted(_ muted: Bool) {
+        guard muted != isHeadsetMuted else { return }
+        isHeadsetMuted = muted
+        log.info("Headset mute \(muted ? "on" : "off")")
+        // Tell the boat, without touching the audio: muting the track would also blind the
+        // check that notices the headset coming back.
+        if room.connectionState == .connected {
+            let room = room, log = log
+            Task {
+                do {
+                    try await room.localParticipant.set(attributes: ["mic": muted ? "headset-muted" : "live"])
+                } catch {
+                    log.error("The boat was not told about the headset mute: \(String(describing: error))")
+                }
+            }
+        }
+        stateChanged()
+    }
+
+    /// Every half minute, what the microphone has been delivering. It shows whether a quiet
+    /// room ever reads as pure silence, which is what would make the headset check wrong.
+    private func logLevels(_ report: MicGate.Report) {
+        guard phase == .connected else {
+            levelWindowStart = Date()
+            return
+        }
+        levelFloorDB = min(levelFloorDB, report.levelDB)
+        levelPeakDB = max(levelPeakDB, report.levelDB)
+        levelLongestSilence = max(levelLongestSilence, report.silentSeconds)
+        levelHistogram.add(report.histogram)
+        if isHeadsetMuted { levelMutedReports += 1 }
+        guard Date().timeIntervalSince(levelWindowStart) >= 30 else { return }
+        log.info("Microphone over 30 s: quietest \(Int(levelFloorDB)) dB, loudest \(Int(levelPeakDB)) dB, "
+            + "longest pure silence \(String(format: "%.1f", levelLongestSilence)) s, muted \(isMuted), "
+            + "headset mute for \(String(format: "%.0f", Double(levelMutedReports) * 0.2)) s. Blocks by dB, \(levelHistogram.text)")
+        levelHistogram = MicGate.Histogram()
+        levelMutedReports = 0
+        levelFloorDB = 0
+        levelPeakDB = -120
+        levelLongestSilence = 0
+        levelWindowStart = Date()
     }
 
     /// iOS noticed speech while the microphone is muted.
@@ -584,7 +664,7 @@ final class Intercom: NSObject, ObservableObject {
             list.append(Talker(id: person.identity?.stringValue ?? UUID().uuidString,
                                name: person.name?.isEmpty == false ? person.name! : "Someone",
                                isSpeaking: person.isSpeaking,
-                               isMuted: !person.isMicrophoneEnabled(),
+                               isMuted: !person.isMicrophoneEnabled() || person.attributes["mic"] == "headset-muted",
                                isLocal: false))
         }
         talkers = list
@@ -681,6 +761,10 @@ extension Intercom: RoomDelegate {
     }
 
     nonisolated func room(_: Room, participant _: Participant, trackPublication _: TrackPublication, didUpdateIsMuted _: Bool) {
+        Task { @MainActor in self.refreshTalkers() }
+    }
+
+    nonisolated func room(_: Room, participant _: Participant, didUpdateAttributes _: [String: String]) {
         Task { @MainActor in self.refreshTalkers() }
     }
 
