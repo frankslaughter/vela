@@ -18,9 +18,11 @@ from datetime import timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from livekit import api, rtc
 from pydantic import BaseModel, Field
+
+from testbench import VOICE_PREFIX, TestBench
 
 HERE = Path(__file__).resolve().parent
 SETTINGS_PATH = Path(os.environ.get("VELA_SETTINGS", HERE / "settings.toml"))
@@ -98,6 +100,7 @@ class Advertiser:
 
 
 advertiser = Advertiser()
+bench = TestBench(SETTINGS, HERE / "logs")
 
 
 class ActivityMonitor:
@@ -145,6 +148,19 @@ class ActivityMonitor:
             room = rtc.Room()
             gone = asyncio.Event()
             room.on("disconnected", lambda *_: gone.set())
+            # The test bench records from these when a recording is on.
+            room.on(
+                "track_subscribed",
+                lambda track, _publication, participant: bench.track_added(
+                    channel, participant.identity, participant.name or participant.identity, track
+                )
+                if track.kind == rtc.TrackKind.KIND_AUDIO
+                else None,
+            )
+            room.on(
+                "track_unsubscribed",
+                lambda _track, _publication, participant: bench.track_removed(channel, participant.identity),
+            )
             room.on(
                 "active_speakers_changed",
                 lambda speakers: self._set_speakers(channel, {p.identity for p in speakers}),
@@ -172,10 +188,13 @@ class ActivityMonitor:
                 pass  # the audio server is down or restarting; try again shortly
             self.listening[channel] = False
             self._set_speakers(channel, set())
+            for key in [k for k in bench.tracks if k[0] == channel]:
+                bench.track_removed(*key)
             await asyncio.sleep(2)
 
 
 monitor = ActivityMonitor()
+bench.speaking = monitor.speaking  # the same dictionary: the bench reads who is talking
 
 # device_id -> what we last knew about that phone. In memory only for now.
 devices: dict[str, dict] = {}
@@ -194,6 +213,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         advertiser.stop()
+        await bench.shutdown()
         await monitor.stop()
         await app.state.livekit.aclose()
 
@@ -283,6 +303,8 @@ async def channel_roster(lk: api.LiveKitAPI, channel: str) -> list[dict]:
                 # No published mic counts as muted: nothing of theirs can be heard.
                 "muted": headset_muted or not mics or all(t.muted for t in mics),
                 "headset_muted": headset_muted,
+                # A test voice from the Mac, not a person.
+                "voice": p.identity.startswith(VOICE_PREFIX),
                 "joined_at": p.joined_at,
                 "speaking": p.identity in monitor.speaking,
                 "last_spoke": monitor.last_spoke.get(p.identity),
@@ -317,3 +339,88 @@ async def activity() -> dict:
 @app.get("/")
 async def roster_page() -> FileResponse:
     return FileResponse(HERE / "roster.html")
+
+
+# ---- Test bench: one person testing several phones. See testbench.py. ----
+
+
+class LogLines(BaseModel):
+    device_id: str
+    name: str = "phone"
+    lines: list[str] = Field(max_length=2000)
+
+
+class VoicesRequest(BaseModel):
+    on: bool
+
+
+class RunRequest(BaseModel):
+    minutes: float = Field(default=30, gt=0, le=600)
+    record: bool = False
+
+
+class CommandRequest(BaseModel):
+    device_id: str
+    action: str
+
+
+def checked_device_id(device_id: str) -> str:
+    if not DEVICE_ID_PATTERN.match(device_id):
+        raise HTTPException(400, "device_id must be 8-64 letters, digits or hyphens")
+    return device_id
+
+
+@app.post("/api/report")
+async def report(body: dict) -> dict:
+    """A phone in test mode says what it is sending and hearing. The reply carries its commands."""
+    checked_device_id(str(body.get("device_id", "")))
+    return {"commands": bench.accept_report(body)}
+
+
+@app.post("/api/log")
+async def phone_log(body: LogLines) -> dict:
+    bench.append_log(checked_device_id(body.device_id), body.name, body.lines)
+    return {"ok": True}
+
+
+@app.get("/api/test")
+async def test_state() -> dict:
+    return {"boat": SETTINGS["boat_name"], "channels": SETTINGS["channels"], **bench.view()}
+
+
+@app.post("/api/test/voices")
+async def test_voices(body: VoicesRequest) -> dict:
+    if body.on:
+        bench.start_voices()
+    else:
+        await bench.stop_voices()
+    return {"voices": bench.voices_on}
+
+
+@app.post("/api/test/run")
+async def test_run(body: RunRequest) -> dict:
+    return {"run": await bench.start_run(body.minutes, body.record)}
+
+
+@app.post("/api/test/run/stop")
+async def test_run_stop() -> dict:
+    return {"last_run": await bench.stop_run()}
+
+
+@app.post("/api/test/command")
+async def test_command(body: CommandRequest) -> dict:
+    try:
+        bench.queue_command(checked_device_id(body.device_id), body.action)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@app.get("/api/test/log/{device_id}", response_class=PlainTextResponse)
+async def test_log(device_id: str) -> str:
+    return bench.read_log(checked_device_id(device_id))
+
+
+@app.get("/test")
+async def test_page() -> FileResponse:
+    return FileResponse(HERE / "test.html")

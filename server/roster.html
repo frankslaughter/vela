@@ -69,6 +69,7 @@
 <body>
 <main>
   <header><h1 id="boat">Vela</h1><span id="count"></span></header>
+  <!-- The test bench, for one person testing several phones, is at /test -->
   <div id="status"><span id="pulse"></span><span id="status-text">Connecting</span></div>
   <div id="problem"></div>
   <div id="channels"></div>
@@ -157,10 +158,10 @@ async function refresh() {
     } else {
       const ul = el("ul");
       for (const p of ch.people) {
-        total += 1;
+        if (!p.voice) total += 1; // a test voice from the Mac is not a person
         const li = el("li", p.muted ? "is-muted" : "");
         li.dataset.id = p.identity;
-        li.dataset.state = p.headset_muted ? "Muted on headset" : (p.muted ? "Muted" : "Live");
+        li.dataset.state = p.voice ? "Test voice" : p.headset_muted ? "Muted on headset" : (p.muted ? "Muted" : "Live");
         const bars = el("span", "bars");
         bars.append(el("i"), el("i"), el("i"));
         const who = el("span", "who");

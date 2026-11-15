@@ -67,4 +67,10 @@ enum Preferences {
         get { store.bool(forKey: "usesSpeakerWithoutHeadset") }
         set { store.set(newValue, forKey: "usesSpeakerWithoutHeadset") }
     }
+
+    /// Test mode: report to the base station's test bench, send it the log, and take its commands.
+    static var isTestMode: Bool {
+        get { store.bool(forKey: "isTestMode") }
+        set { store.set(newValue, forKey: "isTestMode") }
+    }
 }

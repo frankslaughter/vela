@@ -7,6 +7,7 @@ Started 2026-11-14. Done when exit criteria 1 and 3 pass: four phones in full du
 ## What exists
 
 - **Control service**, in `server/`. Reads `settings.toml`, advertises the boat as `_vela._tcp` through macOS's own Bonjour responder, mints LiveKit tokens, and serves a web roster. The roster shows who is talking: the service sits in every channel as a hidden participant named `vela-monitor`, because LiveKit only reports speech to someone in the room who is subscribed to the speaker. It needs the `livekit` Python package as well as `livekit-api`.
+- **Test bench**, for one person testing several phones: phones report what they send and hear, test voices from the Mac give them something to hear, and a page at `/test` shows it, records a timed run and gives a verdict. See `docs/test-bench.md`.
 - **Vela iPhone app**, in `ios/`. Bundle identifier `com.tower3.vela`, team N2AAKXA567, iOS 18 or later, LiveKit Swift SDK 2.19.0.
 - **Lock-screen Live Activity**, a widget extension inside the app, with a mute button that works without unlocking.
 

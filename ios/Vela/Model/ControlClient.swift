@@ -52,4 +52,20 @@ enum ControlClient {
         }
         return try JSONDecoder().decode(JoinTicket.self, from: data)
     }
+
+    /// Posts loose JSON and returns the reply. Used by test mode, whose reports are not worth a type each.
+    static func post(boat: Boat, path: String, body: [String: Any]) async throws -> [String: Any] {
+        guard let url = boat.baseURL?.appending(path: path) else {
+            throw ControlError(message: "The base station advertised an address the app cannot use.")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await session.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw ControlError(message: "The base station refused \(path).")
+        }
+        return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
 }

@@ -82,6 +82,7 @@ struct IntercomView: View {
         case .lost: text += " · no signal"
         default: break
         }
+        if intercom.isTestMode { text += " · test mode" }
         return text
     }
 }

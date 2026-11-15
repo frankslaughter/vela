@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vela test bench</title>
+<style>
+  :root {
+    --bg: #f4f6f8; --card: #ffffff; --ink: #10202c; --dim: #5d6f7c; --line: #dbe2e8;
+    --good: #1a8f4c; --bad: #c0392b; --warn-bg: #fff3d6; --warn-ink: #6b4a00;
+    --talk: #0b6bcb; --chip: #e9eef2; --bad-bg: #fde8e5; --good-bg: #e3f5ea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0c141a; --card: #15212a; --ink: #e9f0f4; --dim: #8fa3b0; --line: #26363f;
+      --good: #3ddc84; --bad: #ff6b5e; --warn-bg: #3a2e10; --warn-ink: #ffd88a;
+      --talk: #5fb2ff; --chip: #223440; --bad-bg: #3d1a17; --good-bg: #123322;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px 16px 48px; background: var(--bg); color: var(--ink);
+         font: 16px/1.4 -apple-system, system-ui, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+  h1 { font-size: 26px; margin: 0; }
+  header a { color: var(--talk); }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; margin-bottom: 16px; padding: 14px 16px; }
+  h2 { font-size: 14px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin: 0 0 10px; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .row + .row { margin-top: 10px; }
+  .grow { flex: 1; }
+  button { font: inherit; padding: 8px 14px; border-radius: 9px; border: 1px solid var(--line);
+           background: var(--chip); color: var(--ink); cursor: pointer; min-height: 40px; }
+  button.primary { background: var(--talk); border-color: var(--talk); color: #fff; }
+  button.stop { background: var(--bad); border-color: var(--bad); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=number] { font: inherit; width: 5em; padding: 7px 8px; border-radius: 9px; border: 1px solid var(--line);
+                       background: var(--card); color: var(--ink); }
+  label { display: inline-flex; align-items: center; gap: 6px; }
+  .note { color: var(--dim); font-size: 14px; }
+  #problem { display: none; background: var(--warn-bg); color: var(--warn-ink); padding: 12px 14px; border-radius: 10px; margin-bottom: 16px; }
+  .phone-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .phone-name { font-size: 21px; font-weight: 650; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 12px; }
+  .chip { background: var(--chip); border-radius: 999px; padding: 3px 10px; font-size: 14px; white-space: nowrap; }
+  .chip.good { background: var(--good-bg); color: var(--good); }
+  .chip.bad { background: var(--bad-bg); color: var(--bad); }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 15px; }
+  th { text-align: left; color: var(--dim); font-weight: 500; font-size: 13px; padding: 4px 10px 4px 0; white-space: nowrap; }
+  td { padding: 6px 10px 6px 0; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.wrap { white-space: normal; }
+  .ok { color: var(--good); font-weight: 600; }
+  .no { color: var(--bad); font-weight: 600; }
+  .dim { color: var(--dim); }
+  .verdict { font-size: 20px; font-weight: 700; }
+  code { font-size: 13px; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">Vela test bench</h1>
+    <a href="/">Roster</a>
+  </header>
+  <div id="problem"></div>
+
+  <section>
+    <h2>Controls</h2>
+    <div class="row">
+      <button id="voices"></button>
+      <span id="voices-note" class="note grow"></span>
+    </div>
+    <div class="row">
+      <label>Run for <input id="minutes" type="number" min="1" max="600" value="30"> minutes</label>
+      <label><input id="record" type="checkbox"> Record each phone's microphone</label>
+      <button id="run" class="primary"></button>
+      <span id="run-note" class="note grow"></span>
+    </div>
+  </section>
+
+  <div id="phones"></div>
+  <section id="last" style="display:none"></section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+};
+const post = (path, body) => fetch(path, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}),
+}).then(refresh);
+const clock = (seconds) => {
+  const s = Math.max(0, Math.round(seconds));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+};
+const ago = (s) => s === null || s === undefined ? "never" : s < 2 ? "now" : s < 90 ? Math.round(s) + " s ago" : Math.round(s / 60) + " min ago";
+const percent = (x, digits) => x === null || x === undefined ? "unknown" : (x * 100).toFixed(digits === undefined ? 1 : digits) + "%";
+const routeName = (r) => !r ? "no microphone" : r.includes("Bluetooth") ? "headset" : r.includes("BuiltIn") ? "phone mic" : r;
+const phaseName = { connected: "On the boat", joining: "Joining", looking: "Looking for the boat", reconnecting: "Getting the boat back", needsName: "No name set" };
+
+let state = null;
+
+function chip(text, kind) { return el("span", "chip" + (kind ? " " + kind : ""), text); }
+
+function phoneCard(p) {
+  const sec = el("section");
+  const head = el("div", "phone-head");
+  head.append(el("span", "phone-name", p.name),
+              el("span", "dim", [p.channel, p.mode].filter(Boolean).join(" · ")),
+              el("span", p.stale ? "no" : "dim", p.age === null ? "no report yet" : "reported " + ago(p.age)));
+  sec.append(head);
+  if (p.stale) {
+    // Old numbers would look like good news. Say only what is known: it has gone quiet.
+    sec.append(el("div", "note", p.age === null
+      ? "This phone has sent its log but no report."
+      : "Not reporting. It was " + (phaseName[p.phase] || "in an unknown state").toLowerCase() + " when last heard from. "
+        + "Either Test mode is off, the app is closed or suspended, or the phone cannot reach the base station."));
+    const row = el("div", "row");
+    const oldLog = el("button", null, "Log");
+    oldLog.onclick = () => window.open("/api/test/log/" + encodeURIComponent(p.device_id), "_blank");
+    row.append(oldLog);
+    sec.append(row);
+    return sec;
+  }
+
+  const chips = el("div", "chips");
+  chips.append(chip(phaseName[p.phase] || p.phase || "unknown", p.phase === "connected" ? "good" : "bad"));
+  chips.append(chip(p.locked ? "Locked" : p.app_state === "active" ? "On screen" : "In the background"));
+  chips.append(chip(routeName(p.route_in)));
+  if (p.battery !== null && p.battery !== undefined) chips.append(chip("Battery " + Math.round(p.battery * 100) + "%" + (p.charging ? ", charging" : "")));
+  if (p.quality) chips.append(chip("Link " + p.quality, p.quality === "poor" || p.quality === "lost" ? "bad" : ""));
+  const mic = p.mic_unavailable ? "Microphone off" : p.headset_muted ? "Muted on headset" : p.muted ? "Muted" : "Live";
+  chips.append(chip(mic, mic === "Live" ? "good" : ""));
+  if (p.commands_waiting) chips.append(chip(p.commands_waiting + " command waiting"));
+  sec.append(chips);
+
+  const wrap = el("div", "scroll");
+  const table = el("table");
+  const headRow = el("tr");
+  for (const h of ["", "Packets", "Sound", "Lost", "Patched over"]) headRow.append(el("th", null, h));
+  table.append(headRow);
+
+  const sendRow = el("tr");
+  sendRow.append(el("td", null, "Sending"),
+                 el("td", p.sending ? "ok" : "no", p.sending ? "flowing" : "stopped"),
+                 el("td", p.talking ? "ok" : "dim", p.talking ? "boat hears talking" : (p.mic_level_db === null || p.mic_level_db === undefined ? "quiet" : "mic " + Math.round(p.mic_level_db) + " dB")),
+                 el("td", "dim", ""), el("td", "dim", ""));
+  table.append(sendRow);
+
+  if (!p.hearing.length) {
+    const row = el("tr");
+    const cell = el("td", "dim wrap", "Hearing nobody: no one else is on its channel");
+    cell.colSpan = 5;
+    row.append(cell);
+    table.append(row);
+  }
+  for (const h of p.hearing) {
+    const row = el("tr");
+    row.append(el("td", null, "Hearing " + h.name),
+               el("td", h.flowing ? "ok" : "no", h.flowing ? "flowing" : "stopped, last " + ago(h.packets_ago)),
+               el("td", h.level_db !== null && h.level_db > -50 ? "ok" : "dim",
+                  (h.level_db === null ? "silent" : Math.round(h.level_db) + " dB") + ", heard " + ago(h.heard_ago)),
+               el("td", h.loss > 0.02 ? "no" : "dim", percent(h.loss)),
+               el("td", h.concealed !== null && h.concealed > 0.05 ? "no" : "dim", percent(h.concealed)));
+    table.append(row);
+  }
+  wrap.append(table);
+  sec.append(wrap);
+
+  const buttons = el("div", "row");
+  for (const [label, action] of [["Mute", "mute"], ["Unmute", "unmute"], ["Next mode", "mode"], ["Next channel", "channel"]]) {
+    const b = el("button", null, label);
+    b.onclick = () => post("/api/test/command", { device_id: p.device_id, action });
+    buttons.append(b);
+  }
+  const log = el("button", null, "Log");
+  log.onclick = () => window.open("/api/test/log/" + encodeURIComponent(p.device_id), "_blank");
+  buttons.append(log);
+  sec.append(buttons);
+  return sec;
+}
+
+function lastRun(run) {
+  const sec = $("last");
+  sec.replaceChildren();
+  if (!run) { sec.style.display = "none"; return; }
+  sec.style.display = "";
+  sec.append(el("h2", null, "Last run"));
+  const verdict = !run.phones.length ? "No phones reported" : run.passed ? "Pass" : "Fail";
+  sec.append(el("div", "verdict " + (run.passed ? "ok" : "no"), verdict));
+  sec.append(el("div", "note", "Ran " + clock(run.seconds) + " of " + run.planned_minutes + " minutes planned. Test voices "
+    + (run.voices ? "on" : "off") + ". Recording " + (run.recording ? "on" : "off") + "."));
+  const wrap = el("div", "scroll");
+  const table = el("table");
+  const head = el("tr");
+  for (const h of ["Phone", "Result", "On the boat", "Locked", "Sending", "Longest report gap", "Worst gap from a voice", "Battery"]) head.append(el("th", null, h));
+  table.append(head);
+  for (const p of run.phones) {
+    const voices = Object.values(p.sources).filter((s) => s.voice);
+    const worst = voices.length ? Math.max(...voices.map((s) => s.longest_gap)) + " s" : "no voice";
+    const battery = p.battery_start === null ? "unknown" : Math.round(p.battery_start * 100) + "% to " + Math.round(p.battery_end * 100) + "%";
+    const row = el("tr");
+    row.append(el("td", null, p.name),
+               el("td", (p.passed ? "ok" : "no") + " wrap", p.passed ? "Pass" : "Fail: " + p.problems.join("; ")),
+               el("td", null, percent(p.connected)), el("td", null, percent(p.locked, 0)), el("td", null, percent(p.sending, 0)),
+               el("td", null, p.longest_report_gap + " s"), el("td", null, worst), el("td", null, battery));
+    table.append(row);
+  }
+  wrap.append(table);
+  sec.append(wrap);
+  const where = el("div", "note");
+  where.append("Full report, samples and any recordings: ", el("code", null, run.folder));
+  sec.append(where);
+}
+
+function render() {
+  const s = state;
+  $("title").textContent = s.boat + " test bench";
+  document.title = s.boat + " test bench";
+
+  $("voices").textContent = s.voices ? "Stop test voices" : "Start test voices";
+  $("voices").className = s.voices ? "stop" : "";
+  $("voices-note").textContent = s.voices
+    ? "A voice on each channel is saying the time every six seconds."
+    : "Voices from this Mac join each channel and say the time, so every phone has something to hear.";
+
+  $("run").textContent = s.run ? "Stop run" : "Start run";
+  $("run").className = s.run ? "stop" : "primary";
+  $("minutes").disabled = $("record").disabled = !!s.run;
+  $("run-note").textContent = s.run
+    ? clock(s.now - s.run.started) + " in, " + clock(s.run.ends - s.now) + " to go" + (s.run.recording ? ". Recording microphones." : "")
+    : (s.voices ? "" : "Start the test voices first, or the run cannot tell whether phones are hearing.");
+
+  const root = $("phones");
+  root.replaceChildren();
+  if (!s.phones.length) {
+    const empty = el("section");
+    empty.append(el("h2", null, "Phones"), el("div", "note",
+      "No phone is reporting. On each phone, open Vela, go to Settings, and turn on Test mode."));
+    root.append(empty);
+  }
+  for (const p of s.phones) root.append(phoneCard(p));
+  lastRun(s.last_run);
+}
+
+async function refresh() {
+  try {
+    state = await (await fetch("/api/test", { cache: "no-store" })).json();
+    $("problem").style.display = "none";
+  } catch (e) {
+    $("problem").textContent = "The control service is not answering.";
+    $("problem").style.display = "block";
+    return;
+  }
+  render();
+}
+
+$("voices").onclick = () => post("/api/test/voices", { on: !state.voices });
+$("run").onclick = () => state.run
+  ? post("/api/test/run/stop")
+  : post("/api/test/run", { minutes: Number($("minutes").value) || 30, record: $("record").checked });
+
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>

@@ -34,6 +34,8 @@ final class LogFile: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "com.tower3.vela.log")
     private var handle: FileHandle?
+    /// Lines not yet sent to the base station. Test mode drains this; otherwise it just stays short.
+    private var pending: [String] = []
     private let time: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -64,6 +66,24 @@ final class LogFile: @unchecked Sendable {
         queue.async { [self] in
             let line = "\(time.string(from: now)) [\(category)] \(message)\n"
             try? handle?.write(contentsOf: Data(line.utf8))
+            pending.append(line)
+            if pending.count > 1500 { pending.removeFirst(pending.count - 1500) }
         }
+    }
+
+    /// Hands over the lines written since the last call.
+    func takePending() async -> [String] {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                let lines = pending
+                pending = []
+                continuation.resume(returning: lines)
+            }
+        }
+    }
+
+    /// Returns lines that could not be sent, to go out with the next batch.
+    func putBack(_ lines: [String]) {
+        queue.async { [self] in pending = Array((lines + pending).suffix(1500)) }
     }
 }

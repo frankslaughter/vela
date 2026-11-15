@@ -30,6 +30,17 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("Test mode", isOn: Binding(
+                        get: { intercom.isTestMode },
+                        set: { intercom.setTestMode($0) }
+                    ))
+                } header: {
+                    Text("Testing")
+                } footer: {
+                    Text("For testing several phones alone. This phone tells the base station what it is sending and hearing, sends it this phone's log, and lets the base station mute it and change its mode and channel. See the test page on the base station. Changing it rejoins the boat.")
+                }
+
+                Section {
                     LabeledContent("Microphone level", value: meter.levelDB <= -119 ? "Silent" : "\(Int(meter.levelDB.rounded())) dB")
                     LabeledContent("Gate", value: meter.isGateOpen ? "Open" : "Closed")
                 } header: {

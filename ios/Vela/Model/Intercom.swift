@@ -79,6 +79,8 @@ final class Intercom: NSObject, ObservableObject {
     @Published private(set) var quality: ConnectionQuality = .unknown
     @Published private(set) var displayName = Preferences.displayName
     @Published private(set) var usesSpeakerWithoutHeadset = Preferences.usesSpeakerWithoutHeadset
+    /// Reporting to the base station's test bench and taking its commands. See `Intercom+Testing.swift`.
+    @Published private(set) var isTestMode = Preferences.isTestMode
     /// The boat to be on. Set by choosing one, cleared by leaving.
     @Published private(set) var wantedBoat = Preferences.boatName
 
@@ -87,18 +89,18 @@ final class Intercom: NSObject, ObservableObject {
     /// True when nothing of yours can be heard: muted, or in PTT and not talking.
     var isSilent: Bool { isMicUnavailable || isHeadsetMuted || (mode == .ptt ? !isTalking : isMuted) }
 
-    private let room = Room()
+    let room = Room()
     private let browser = BoatBrowser()
     private let gate = MicGate()
     private let tones = Tones()
     private let activity = ActivityController()
     /// Also written to Documents/vela-log.txt on the phone; see EventLog.
-    private let log = EventLog(category: "intercom")
+    let log = EventLog(category: "intercom")
 
     private var hasStarted = false
     /// The app has been on screen at least once since it was started.
     private var hasBeenOnScreen = false
-    private var currentBoat: Boat?
+    private(set) var currentBoat: Boat?
     private var joinTask: Task<Void, Never>?
     private var joinGeneration = 0
     private var retryTask: Task<Void, Never>?
@@ -108,6 +110,12 @@ final class Intercom: NSObject, ObservableObject {
     private var isTalkHeld = false
     private var isTalkLatched = false
     private var mutedSpeechSince: Date?
+    var testTask: Task<Void, Never>?
+    /// For the test bench: how often this phone has joined, and lost the boat without being asked.
+    private(set) var joinCount = 0
+    private(set) var dropCount = 0
+    /// Loudest microphone level since the last test report.
+    var testMicPeakDB: Float = -120
     /// Microphone level over the last half minute, for the log.
     private var levelFloorDB: Float = 0
     private var levelPeakDB: Float = -120
@@ -186,6 +194,8 @@ final class Intercom: NSObject, ObservableObject {
         browser.start()
 
         phase = displayName.isEmpty ? .needsName : .looking
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        startTestReports()
     }
 
     /// The app is being closed, for example swiped away in the app switcher.
@@ -302,6 +312,16 @@ final class Intercom: NSObject, ObservableObject {
         updateTalking()
     }
 
+    /// Takes effect by rejoining, because listening statistics are switched on when the room is joined.
+    func setTestMode(_ on: Bool) {
+        guard on != isTestMode else { return }
+        isTestMode = on
+        Preferences.isTestMode = on
+        log.info("Test mode \(on)")
+        startTestReports()
+        if phase.isAboard, let boat = currentBoat { join(boat, channel: channel) }
+    }
+
     func setUsesSpeakerWithoutHeadset(_ on: Bool) {
         usesSpeakerWithoutHeadset = on
         Preferences.usesSpeakerWithoutHeadset = on
@@ -381,7 +401,8 @@ final class Intercom: NSObject, ObservableObject {
                 let connect = ConnectOptions(reconnectAttempts: 60, isDscpEnabled: true)
                 let options = RoomOptions(
                     defaultAudioCaptureOptions: AudioCaptureOptions(echoCancellation: true, autoGainControl: true, noiseSuppression: true),
-                    defaultAudioPublishOptions: AudioPublishOptions(encoding: AudioEncoding(maxBitrate: 32000), dtx: true, red: true)
+                    defaultAudioPublishOptions: AudioPublishOptions(encoding: AudioEncoding(maxBitrate: 32000), dtx: true, red: true),
+                    reportRemoteTrackStatistics: isTestMode // what this phone hears, for the test bench
                 )
                 try await room.connect(url: ticket.livekitURL, token: ticket.token, connectOptions: connect, roomOptions: options)
                 guard generation == joinGeneration else { return }
@@ -405,6 +426,7 @@ final class Intercom: NSObject, ObservableObject {
                 channel = ticket.channel
                 Preferences.channel = ticket.channel
                 joinTask = nil
+                joinCount += 1
                 phase = .connected
                 log.info("Joined \(ticket.boat) on \(ticket.channel), muted \(self.isMuted), microphone \(micStarted)")
                 log.info("Audio after joining: \(audioSummary)")
@@ -444,6 +466,7 @@ final class Intercom: NSObject, ObservableObject {
             // Keeps the microphone pipeline warm between connections, which also keeps
             // the app alive in a pocket while it waits for the boat to come back.
             try? await AudioManager.shared.setRecordingAlwaysPreparedMode(true)
+            if isTestMode { await room.localParticipant.audioTracks.first?.track?.set(reportStatistics: true) }
             return true
         } catch {
             log.error("Microphone did not start: \(String(describing: error))")
@@ -499,6 +522,7 @@ final class Intercom: NSObject, ObservableObject {
         meter.isGateOpen = report.isOpen
 
         logLevels(report)
+        testMicPeakDB = max(testMicPeakDB, report.levelDB)
 
         // A headset muted on its own boom sends next to nothing, and the phone is never told.
         // A second and a half below the faint level on a headset microphone is taken as that
@@ -701,6 +725,7 @@ final class Intercom: NSObject, ObservableObject {
             // Only react when we did not ask for it: joins and leaves change the phase first.
             guard phase.isAboard else { return }
             log.error("Lost the boat: \(String(describing: self.room.disconnectError))")
+            dropCount += 1
             phase = .looking
             problem = "Lost \(boatName). Rejoining when it is back in range."
             tones.play(.lost)
