@@ -1,0 +1,82 @@
+# Vela iPhone app. The Xcode project is generated from this file:
+#   cd ios && xcodegen generate
+# Edit this file, not the .xcodeproj, when adding targets or settings.
+# Source files in the listed folders are picked up when the project is regenerated.
+
+name: Vela
+
+options:
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: N2AAKXA567
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1"
+
+packages:
+  LiveKit:
+    url: https://github.com/livekit/client-sdk-swift
+    exactVersion: 2.19.0
+
+targets:
+  Vela:
+    type: application
+    platform: iOS
+    sources:
+      - Vela
+      - Shared
+    dependencies:
+      - package: LiveKit
+      - target: VelaActivity
+    settings:
+      base:
+        # Permanent once a build reaches TestFlight. See the Names table in the proposal.
+        PRODUCT_BUNDLE_IDENTIFIER: com.tower3.vela
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    info:
+      path: Vela/Info.plist
+      properties:
+        CFBundleDisplayName: Vela
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        ITSAppUsesNonExemptEncryption: false
+        NSMicrophoneUsageDescription: Vela sends your voice to the rest of the crew.
+        NSLocalNetworkUsageDescription: Vela finds the boat's base station on the boat's Wi-Fi.
+        # Permanent: the contract between the apps and the base station.
+        NSBonjourServices:
+          - _vela._tcp
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        UIBackgroundModes:
+          - audio
+          - voip # CallKit refuses calls from an app without it
+        NSSupportsLiveActivities: true
+
+  VelaActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - VelaActivity
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tower3.vela.activity
+    info:
+      path: VelaActivity/Info.plist
+      properties:
+        CFBundleDisplayName: Vela
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension

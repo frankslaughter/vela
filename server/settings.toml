@@ -1,0 +1,15 @@
+# Vela settings. Every changeable name lives in this one file.
+# See the Names table in the proposal, section 7.
+# Restart the control service after editing.
+
+boat_name      = "Unnamed Boat"   # Bonjour instance name and the entry in the app's boat list
+assistant_name = "Vela"           # spoken name and the assistant's participant identity
+channels       = ["all", "crew"]  # the first one is the default
+
+[control]
+port = 7890                       # the control service; phones find it over Bonjour, never by number
+
+[livekit]
+port       = 7880
+api_key    = "devkey"             # LiveKit's development placeholders; replace before the dock
+api_secret = "secret"

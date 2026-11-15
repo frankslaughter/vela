@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+
+# LiveKit's example app, cloned for Stage 0. It is its own repository:
+# https://github.com/livekit-examples/swift-example
+stage0/swift-example/
+
+# Stage 0 join tokens. Short-lived, and tokens do not belong in history.
+stage0/join-details.md
+
+# Generated from ios/project.yml. Recreate with: cd ios && xcodegen generate
+ios/Vela.xcodeproj/
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/
+
+# Python
+.venv/
+__pycache__/
+
+# Server logs
+server/logs/
