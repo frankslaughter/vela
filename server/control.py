@@ -1,7 +1,7 @@
 """Vela control service.
 
 Advertises the boat over Bonjour, mints LiveKit tokens for phones that ask to
-join, and serves the roster. Everything it needs to know comes from
+join, listens for who is talking, and serves the roster. Everything it needs to know comes from
 settings.toml; nothing here refers to a machine by address.
 """
 
@@ -19,7 +19,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
-from livekit import api
+from livekit import api, rtc
 from pydantic import BaseModel, Field
 
 HERE = Path(__file__).resolve().parent
@@ -30,6 +30,8 @@ SERVICE_TYPE = "_vela._tcp"
 
 TOKEN_LIFETIME = timedelta(hours=24)
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9-]{8,64}$")
+# The control service's own seat in each channel. Phones never see it.
+MONITOR_IDENTITY = "vela-monitor"
 
 
 def load_settings() -> dict:
@@ -97,6 +99,84 @@ class Advertiser:
 
 advertiser = Advertiser()
 
+
+class ActivityMonitor:
+    """Knows who is talking, by sitting in every channel as a hidden participant.
+
+    LiveKit's server API lists people and their mute state, but not speech. Someone in a
+    room is told which of the people they are listening to are speaking, so the control
+    service takes a seat: hidden from the phones, publishing nothing. It has to subscribe
+    to everyone's microphone to be told about them; the audio it receives is not used.
+    """
+
+    def __init__(self) -> None:
+        self.speaking: dict[str, str] = {}  # identity -> channel
+        self.last_spoke: dict[str, float] = {}  # identity -> time
+        self.listening: dict[str, bool] = {}  # channel -> seat taken
+        self.tasks: list[asyncio.Task] = []
+
+    def start(self) -> None:
+        self.tasks = [asyncio.create_task(self._watch(c)) for c in SETTINGS["channels"]]
+
+    async def stop(self) -> None:
+        for task in self.tasks:
+            task.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+
+    def snapshot(self) -> dict:
+        return {
+            "listening": bool(self.listening) and all(self.listening.values()),
+            "speaking": sorted(self.speaking),
+            "last_spoke": self.last_spoke,
+        }
+
+    def _set_speakers(self, channel: str, identities: set[str]) -> None:
+        now = time.time()
+        for identity in [i for i, c in self.speaking.items() if c == channel and i not in identities]:
+            del self.speaking[identity]
+            self.last_spoke[identity] = now  # when they stopped
+        for identity in identities:
+            self.speaking[identity] = channel
+            self.last_spoke[identity] = now
+
+    async def _watch(self, channel: str) -> None:
+        url = f"ws://127.0.0.1:{SETTINGS['livekit_port']}"
+        while True:
+            room = rtc.Room()
+            gone = asyncio.Event()
+            room.on("disconnected", lambda *_: gone.set())
+            room.on(
+                "active_speakers_changed",
+                lambda speakers: self._set_speakers(channel, {p.identity for p in speakers}),
+            )
+            token = (
+                api.AccessToken(SETTINGS["api_key"], SETTINGS["api_secret"])
+                .with_identity(MONITOR_IDENTITY)
+                .with_grants(
+                    api.VideoGrants(
+                        room_join=True, room=channel, hidden=True,
+                        can_publish=False, can_publish_data=False,
+                    )
+                )
+                .with_ttl(TOKEN_LIFETIME)
+                .to_jwt()
+            )
+            try:
+                await room.connect(url, token, rtc.RoomOptions(auto_subscribe=True))
+                self.listening[channel] = True
+                await gone.wait()
+            except asyncio.CancelledError:
+                await room.disconnect()
+                raise
+            except Exception:
+                pass  # the audio server is down or restarting; try again shortly
+            self.listening[channel] = False
+            self._set_speakers(channel, set())
+            await asyncio.sleep(2)
+
+
+monitor = ActivityMonitor()
+
 # device_id -> what we last knew about that phone. In memory only for now.
 devices: dict[str, dict] = {}
 
@@ -109,10 +189,12 @@ async def lifespan(app: FastAPI):
         SETTINGS["api_key"],
         SETTINGS["api_secret"],
     )
+    monitor.start()
     try:
         yield
     finally:
         advertiser.stop()
+        await monitor.stop()
         await app.state.livekit.aclose()
 
 
@@ -188,6 +270,8 @@ async def channel_roster(lk: api.LiveKitAPI, channel: str) -> list[dict]:
         raise
     people = []
     for p in res.participants:
+        if p.identity == MONITOR_IDENTITY or p.permission.hidden:
+            continue  # our own listening seat
         mics = [t for t in p.tracks if t.source == api.TrackSource.MICROPHONE]
         people.append(
             {
@@ -196,6 +280,8 @@ async def channel_roster(lk: api.LiveKitAPI, channel: str) -> list[dict]:
                 # No published mic counts as muted: nothing of theirs can be heard.
                 "muted": not mics or all(t.muted for t in mics),
                 "joined_at": p.joined_at,
+                "speaking": p.identity in monitor.speaking,
+                "last_spoke": monitor.last_spoke.get(p.identity),
                 "attributes": dict(p.attributes),
             }
         )
@@ -212,8 +298,16 @@ async def roster(request: Request) -> dict:
     return {
         "boat": SETTINGS["boat_name"],
         "ok": True,
+        # False while the control service has no listening seat, so speech is unknown.
+        "listening": monitor.snapshot()["listening"],
         "channels": [{"name": c, "people": people} for c, people in zip(SETTINGS["channels"], lists)],
     }
+
+
+@app.get("/api/activity")
+async def activity() -> dict:
+    """Who is talking right now. Answered from memory, so it can be asked several times a second."""
+    return monitor.snapshot()
 
 
 @app.get("/")
