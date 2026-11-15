@@ -10,7 +10,7 @@ Build a phone-based intercom on a self-hosted WebRTC server (LiveKit) running on
 
 Why this shape:
 
-- **Full duplex with per-person gating.** Everyone can talk and hear at once. Open mics are the default while trolling, as with the Eartec, with voice activation available for anyone in a noisy spot and a one-touch self-mute from the headset button or the wrist. The captain can force-mute anyone.
+- **Full duplex with per-person gating.** Everyone can talk and hear at once. Open mics are the default while trolling, as with the Eartec, with voice activation available for anyone in a noisy spot and a one-touch self-mute from the wrist or the lock screen. The captain can force-mute anyone.
 - **Earpieces the crew will actually wear and can afford to lose.** Light open-ear headsets, tethered, cheap enough to keep spares. This is the direct answer to the Eartec complaints.
 - **Gating matters more as talkers multiply.** Eight open mics sum eight copies of the engine noise floor into everyone's ear. Per-talker gating and level normalization are what make a 6-8 person mix usable.
 - **Phones do the audio, the Watch does the buttons.** watchOS does not give third-party apps a background, real-time, two-way audio path over the network. The Watch is the glove-friendly, wet-hands control surface, which is what you actually want on the wrist.
@@ -31,7 +31,7 @@ The boat, not the software, sets the requirements.
 | Distance | 35-65 ft boat, tower to cockpit ~30-50 ft | The UniFi gateway's built-in AP in the cabin first; a second AP only if the tower or cockpit drops |
 | Noise | Engines at trolling RPM, 10-20 kt apparent wind, water, shouting | Boom mic or bone-conduction preferred; noise gate keyed on speech, not level |
 | Power | 120 V from the generator | Mac mini base station; small UPS to ride through generator starts and transfers |
-| Hands | Wet, gloved, holding rods | No touchscreen for core actions; Watch + headset button |
+| Hands | Wet, gloved, holding rods | No touchscreen for core actions; Watch first, lock-screen button as the fallback |
 | Water | Spray, rain, occasional dunk | Phone in pocket or dry case, screen off; earpiece IP55 or better |
 | Day length | 10-14 h underway | Phone battery management; Watch is the weak link |
 | Earshot | People within 10 ft hear each other directly | Latency must stay low or you hear an echo of the real voice |
@@ -70,8 +70,8 @@ Control path: a small "vela" service on the base station owns the roster, mints 
 
 - Native Swift app on the LiveKit iOS SDK.
 - Audio session: `playAndRecord`, mode `voiceChat`, `allowBluetoothHFP`. This routes to the headset's hands-free profile, which is what enables the headset mic. Voice quality is 16 kHz wideband, which is fine for speech.
-- Background: the `audio` background mode with a continuously active audio session keeps the app alive with the screen locked and the phone in a pocket. Evaluate CallKit as an alternative in Phase 1; it is more robust against the system suspending the app, but it changes what the headset button means (a press ends the "call").
-- Headset button: register for the play/pause remote command. A single press on an AirPods stem or a headset multifunction button toggles the mic. This is the one hands-free control that works across nearly every Bluetooth headset.
+- Background: the `audio` background mode with a continuously active audio session keeps the app alive with the screen locked and the phone in a pocket. CallKit was tried in Stage 1 of the prototype and dropped; see the next point.
+- Headset button: not available on iPhone. Stage 1 of the prototype tested it with the Shokz OpenComm2 and found two things. While the intercom holds a headset in its hands-free profile, the button sends a call command, not play/pause, and iOS gives call commands only to an app that has registered a call through CallKit. With CallKit the press does arrive, but as "hang up": iOS ends the call regardless, so the app has to start a new call on every press, about a second each time, and the phone shows a call in progress on its lock screen for the whole trip. That was judged not worth it. Mute on iPhone comes from the Watch and the lock-screen button. The details are in `docs/stage-1-log.md`.
 - Auto-join: browse for base stations over Bonjour, list the boats found, and remember the one chosen. From then on, join that boat on sight, on the last-used channel with the saved display name. The app should be usable without ever unlocking the phone once configured.
 - Big-target UI: three buttons (mode, mute, channel), a "who is talking" strip, battery and signal. Nothing smaller than a thumb with a wet glove.
 
@@ -109,7 +109,7 @@ Bone-conduction with a boom is the default recommendation for crew: comfortable 
 
 Shokz OpenMeet and OpenMeet2 are not on the list: best mic claims in the range, but no water rating and 78 g. The full model-by-model check, with sources, is in [shokz-comparison.md](shokz-comparison.md).
 
-One caution specific to the OpenComm2. The mute button on its boom mutes the microphone inside the headset, and Shokz confirms the phone is not told. That would leave the roster showing the person live, silence the "you're muted" reminder, and hide the mute from the captain. The app therefore binds mute to the multifunction button, which the OpenComm2 also has, and the crew is told the boom button is not the mute. Stage 1 of the prototype checks whether the app can detect a locally muted mic as dead silence and warn, because someone will press it anyway.
+One caution specific to the OpenComm2. The mute button on its boom mutes the microphone inside the headset, and Shokz confirms the phone is not told. That would leave the roster showing the person live, silence the "you're muted" reminder, and hide the mute from the captain. The multifunction button cannot be used for mute on iPhone (section 7), so the crew is told to mute from the Watch or the lock screen and that the boom button is not the mute. Stage 1 of the prototype checks whether the app can detect a locally muted mic as dead silence and warn, because someone will press it anyway.
 
 ## 5. Audio behavior
 
@@ -117,7 +117,7 @@ One caution specific to the OpenComm2. The mute button on its boom mutes the mic
 
 - **Open, the trolling default.** Mic always on, exactly how the Eartec works today, so the crew's habits carry over. Per-talker level normalization on the receiving side keeps a shouting angler and a quiet captain at the same level.
 - **VOX.** Mic gated by a speech detector working on the noise-suppressed signal, with a hangover of about 400 ms. The gate keys on speech likelihood rather than raw level so engine noise at trolling RPM does not open it. For anyone in a noisy spot, or for everyone when six or more are on and the noise floor stacks. The captain can push the whole boat to VOX with one command.
-- **PTT.** Momentary (hold on the Watch) or latched (tap headset button). For running between spots at 25+ kt, when no gate will hold.
+- **PTT.** Momentary (hold on the Watch) or latched (tap the Watch or the lock-screen button). For running between spots at 25+ kt, when no gate will hold.
 
 **Handling 3-8 simultaneous talkers.** Bandwidth and CPU are not the problem: seven incoming Opus streams are about 220 kbps and a few percent of a phone's CPU. The problem is noise stacking and intelligibility. Three things keep the mix usable:
 
@@ -131,10 +131,9 @@ Muting yourself has to be faster and more reliable than talking, because it is w
 
 **Ways to mute, all equivalent:**
 
-- **Headset button, single press.** Toggles mute on AirPods stems and on the multifunction button of nearly every Bluetooth headset. This is the primary path because it needs no looking and no wrist.
 - **Watch, one big button.** The app's main screen is a mute toggle that fills the display. On Series 9, Ultra 2, and later, the Double Tap gesture is wired to that button through the primary-action hand gesture shortcut, so a pinch of the fingers mutes without touching anything.
 - **Phone lock screen.** A Live Activity shows mute state and a toggle without unlocking.
-- **Cough switch.** Holding the Watch button (or holding the headset button on headsets that support hold) mutes only while held and releases when let go.
+- **Cough switch.** Holding the Watch button mutes only while held and releases when let go.
 
 **Confirmation and reminders:**
 
@@ -240,7 +239,7 @@ Vela is also the name of the assistant: a chatbot on the Mac mini that the crew 
 
 ### How you talk to it
 
-- **Hold the Ask button on the Watch** (or double-press the headset button) and speak. Your audio is routed to the assistant instead of the crew for as long as you hold. This is the primary path: no wake word to miss in the wind, no risk of the crew hearing you talk to a computer.
+- **Hold the Ask button on the Watch** and speak. Your audio is routed to the assistant instead of the crew for as long as you hold. This is the primary path: no wake word to miss in the wind, no risk of the crew hearing you talk to a computer.
 - **Wake word** ("hey Vela") as a later option. It has to run on each phone continuously, which costs battery and mis-fires in wind, so it is not the first version.
 - **Text** from the helm dashboard or the phone app, for the cabin and for reviewing the day.
 - **It answers in your ear only**, in one short sentence, and reads back what it logged. Announcements to everyone ("lines in, we're heading home") are a deliberate command, not a default.
@@ -374,7 +373,7 @@ There is no pilot phase. The Eartec experience already answers whether open mics
 
 **Phase 1, MVP (6-8 weeks of part-time work).**
 - Base station: LiveKit plus the control service, mDNS, roster dashboard.
-- iPhone app: auto-join, three talk modes, self-mute from headset button and lock screen with in-ear confirmation, "you're muted" reminder, background audio, big-button UI.
+- iPhone app: auto-join, three talk modes, self-mute from the lock screen with in-ear confirmation, "you're muted" reminder, background audio, big-button UI.
 - Watch app: full-screen mute toggle with Double Tap, hold-to-talk, channel, haptics.
 - Android app: parity on talk modes and auto-join.
 
@@ -403,7 +402,7 @@ There is no pilot phase. The Eartec experience already answers whether open mics
 - **Latency is where the new system is worse than the Eartec.** The Eartec is near zero latency; the Bluetooth path is 160-300 ms. Crew standing together will hear a delayed copy of a voice they can also hear directly. This is the number one risk on the intercom side, and the day-one check exists to measure it. Mitigations, in order: wired boom earpieces for the people who stand together, a tight jitter buffer, and lower-latency Bluetooth headsets as they appear.
 - **The crew already has an intercom that works.** If plain talking is not at least as good as the Eartec, they will go back to it, and the assistant and log never get used. Keep the Eartec aboard through rollout and do not retire it until the crew asks to.
 - **iOS background survival.** The audio background mode is well trodden, but test Low Power Mode, a long day, and phones in dry bags that overheat in the sun.
-- **Headset button semantics.** Each headset maps its buttons a little differently. Test the specific models the crew will use.
+- **Headset button.** Settled for iPhone in Stage 1 of the prototype: a Bluetooth headset's button cannot be used for mute (section 7). That leaves the Watch as the only hands-free mute, which raises its priority. Still open for Android, where the button arrives a different way and has not been tested.
 - **Wi-Fi around the tower.** Aluminum plus a hardtop can shadow the bridge. Start with the gateway's built-in AP, add an outdoor AP only if the day-one check shows drops.
 - **Watch battery.** A Watch driving haptics and a live control screen all day may not make it. Use the complication for state and open the app only to act.
 - **Feedback with the hailer.** If a hailer or cockpit speaker is ever fed the intercom mix, it will feed back into open mics. Keep speakers on a one-way channel.

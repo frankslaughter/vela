@@ -60,7 +60,6 @@ targets:
           NSAllowsLocalNetworking: true
         UIBackgroundModes:
           - audio
-          - voip # CallKit refuses calls from an app without it
         NSSupportsLiveActivities: true
 
   VelaActivity:

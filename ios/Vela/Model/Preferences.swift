@@ -67,11 +67,4 @@ enum Preferences {
         get { store.bool(forKey: "usesSpeakerWithoutHeadset") }
         set { store.set(newValue, forKey: "usesSpeakerWithoutHeadset") }
     }
-
-    /// Experimental: register the intercom session with iOS as a phone call (CallKit),
-    /// so the button on a Bluetooth headset reaches the app. Off by default.
-    static var usesCallKit: Bool {
-        get { store.bool(forKey: "usesCallKit") }
-        set { store.set(newValue, forKey: "usesCallKit") }
-    }
 }

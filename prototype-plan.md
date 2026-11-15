@@ -10,7 +10,7 @@ Eight exit criteria. When all eight pass at home, the prototype is ready for the
 |---|---|---|
 | 1 | Four iPhones in full duplex on Bluetooth headsets for 30 minutes with screens locked and phones in pockets | Four people in four rooms, or two people plus two phones playing speech |
 | 2 | Mouth-to-ear latency measured, under 250 ms on Bluetooth and under 150 ms wired | Clap test recorded on a laptop, measured in an audio editor |
-| 3 | Mute from the headset button and the Watch, with in-ear confirmation and the "you're muted" reminder | Each headset model the crew will use |
+| 3 | Mute from the lock screen and the Watch, with in-ear confirmation and the "you're muted" reminder. The headset button was dropped in Stage 1: it cannot be used on iPhone | Each headset model the crew will use |
 | 4 | Open, VOX, and PTT modes hold up against recorded engine and wind noise at realistic level | Boat noise recording played from a speaker beside the talkers |
 | 5 | Hold-to-ask on the Watch: "mute me", "put me on crew", "log a raised sail", "what's the count", "scratch that", each answered in under two seconds, with no internet | On the intercom VLAN, which the firewall rule keeps off the internet |
 | 6 | Crew-channel calls logged automatically from a read script with at least nine of ten caught and the setup-talk false positives rejected | Two people reading a scripted fishing day over the intercom |
@@ -97,7 +97,7 @@ Each stage ends with a test that can be run at home and a short log entry in `do
 
 Alongside it, the first version of the control service: reads `server/settings.toml`, advertises `_vela._tcp` under the boat's name, mints LiveKit tokens, holds the roster, serves a one-page web roster.
 
-**Test.** Four phones, screens locked, in pockets, 30 minutes. Headset button on each headset model. On the OpenComm2, press the boom mute button and confirm the app notices the dead-silent mic and warns, since the phone is not told about that mute. Walk out of Wi-Fi range and back. Exit criteria 1 and 3.
+**Test.** Four phones, screens locked, in pockets, 30 minutes. Mute from the lock screen with each headset model. On the OpenComm2, press the boom mute button and confirm the app notices the dead-silent mic and warns, since the phone is not told about that mute. Walk out of Wi-Fi range and back. Exit criteria 1 and 3.
 
 ### Stage 2: Latency and noise
 
@@ -142,7 +142,7 @@ Optionally, a car ride: the MacBook and two phones on one phone's personal hotsp
 ## 7. What is deliberately left out
 
 - Android. Added after the iPhone app is right; the LiveKit Android SDK makes it a port, not a redesign.
-- CallKit. Evaluated only if plain background audio proves unreliable in Stage 1.
+- CallKit. Tried in Stage 1 for the headset button and dropped; see `docs/stage-1-log.md`.
 - The 30B-class model. The grammar plus an 8B model is enough to prove the assistant; the bigger model arrives with the Mac mini.
 - The dedicated keyword spotter. The recognizer running continuously on the crew track is good enough to prototype and collects the clips the real spotter trains on.
 - VHF or hailer bridge, day recorder, online answer mode, wake word.

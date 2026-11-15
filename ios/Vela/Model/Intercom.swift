@@ -76,8 +76,6 @@ final class Intercom: NSObject, ObservableObject {
     @Published private(set) var quality: ConnectionQuality = .unknown
     @Published private(set) var displayName = Preferences.displayName
     @Published private(set) var usesSpeakerWithoutHeadset = Preferences.usesSpeakerWithoutHeadset
-    /// Experimental: register the session with iOS as a call, so a headset's button reaches us.
-    @Published private(set) var usesCallKit = Preferences.usesCallKit
     /// The boat to be on. Set by choosing one, cleared by leaving.
     @Published private(set) var wantedBoat = Preferences.boatName
 
@@ -91,9 +89,8 @@ final class Intercom: NSObject, ObservableObject {
     private let gate = MicGate()
     private let tones = Tones()
     private let activity = ActivityController()
-    private let call = CallSession()
-    /// Read these in Console.app, filtered on the subsystem, when testing on a phone.
-    private let log = Logger(subsystem: "com.tower3.vela", category: "intercom")
+    /// Also written to Documents/vela-log.txt on the phone; see EventLog.
+    private let log = EventLog(category: "intercom")
 
     private var hasStarted = false
     /// The app has been on screen at least once since it was started.
@@ -105,7 +102,6 @@ final class Intercom: NSObject, ObservableObject {
     /// Seconds before the next join attempt. Doubles after each failure, so a boat that
     /// cannot be joined is not hammered; back to three seconds on any success or user action.
     private var retryDelay: Double = 3
-    private var isRestartingCall = false
     private var isTalkHeld = false
     private var isTalkLatched = false
     private var mutedSpeechSince: Date?
@@ -154,12 +150,6 @@ final class Intercom: NSObject, ObservableObject {
         syncGate()
 
         MuteIntentBridge.handler = { [weak self] in self?.buttonPressed() }
-        call.onEnded = { [weak self] in self?.callEndedByPhone() }
-        call.onMuteRequested = { [weak self] muted in
-            guard let self, mode != .ptt else { return }
-            setMuted(muted)
-        }
-        call.onHeld = { [weak self] held in self?.audioInterrupted(held ? .began : .ended) }
         activity.endAll()
 
         let center = NotificationCenter.default
@@ -192,7 +182,6 @@ final class Intercom: NSObject, ObservableObject {
     /// Take the card off the lock screen and tell the server, so neither claims we are still here.
     func willTerminate() {
         log.info("Closing: leaving the boat")
-        call.end()
         let room = room
         ActivityController.endAllBeforeExit { await room.disconnect() }
     }
@@ -248,8 +237,6 @@ final class Intercom: NSObject, ObservableObject {
         Task {
             await room.disconnect()
             try? await AudioManager.shared.setRecordingAlwaysPreparedMode(false)
-            // Unless a new join began meanwhile, which now owns the call.
-            if joinTask == nil { call.end() }
         }
         publishState()
     }
@@ -268,14 +255,13 @@ final class Intercom: NSObject, ObservableObject {
         if !muted, notice == .youreMuted { notice = nil }
         syncGate()
         applyMicState()
-        call.showMuted(muted)
         stateChanged()
     }
 
     func cycleMode() {
         mode = mode.next
         Preferences.mode = mode
-        log.info("Mode \(self.mode.label, privacy: .public)")
+        log.info("Mode \(self.mode.label)")
         isTalkHeld = false
         isTalkLatched = false
         isTalking = false
@@ -306,37 +292,7 @@ final class Intercom: NSObject, ObservableObject {
         applyAudioSessionPreference()
     }
 
-    /// Experimental. Takes effect by rejoining, because it changes who owns the audio session.
-    func setUsesCallKit(_ on: Bool) {
-        guard on != usesCallKit else { return }
-        usesCallKit = on
-        Preferences.usesCallKit = on
-        if phase.isAboard, let boat = currentBoat { join(boat, channel: channel) }
-    }
-
-    /// iOS ended the call. Nearly always that is the headset's button, which can only say
-    /// "hang up". Get a new call up first, so the audio is running again, then count the press.
-    private func callEndedByPhone() {
-        guard usesCallKit, phase.isAboard, !isRestartingCall, let boat = currentBoat else { return }
-        isRestartingCall = true
-        let generation = joinGeneration
-        let began = Date()
-        Task {
-            defer { isRestartingCall = false }
-            do {
-                try await call.begin(boat: boatName, options: sessionOptions)
-                guard generation == joinGeneration else { return }
-                log.info("Call restarted in \(Int(Date().timeIntervalSince(began) * 1000)) ms")
-                buttonPressed()
-            } catch {
-                guard generation == joinGeneration else { return }
-                log.error("Call not restarted: \(String(describing: error), privacy: .public)")
-                join(boat, channel: channel) // tries the call once more, then falls back to plain audio
-            }
-        }
-    }
-
-    /// The lock-screen button, or the headset button when the call switch is on: one press, no looking.
+    /// The lock-screen button: one press, no looking.
     private func buttonPressed() {
         guard phase.isAboard else { return }
         if mode == .ptt {
@@ -389,11 +345,10 @@ final class Intercom: NSObject, ObservableObject {
         retryTask?.cancel()
         phase = .joining(boat.name)
         problem = nil
-        log.info("Joining \(boat.name, privacy: .public) at \(boat.host, privacy: .public)")
+        log.info("Joining \(boat.name) at \(boat.host)")
 
         joinTask = Task { [weak self] in
             guard let self else { return }
-            var beganCall = false
             do {
                 guard await LiveKitSDK.ensureDeviceAccess(for: [.audio]) else {
                     throw ControlError(message: "Vela needs the microphone. Allow it in Settings.")
@@ -406,25 +361,6 @@ final class Intercom: NSObject, ObservableObject {
 
                 if room.connectionState != .disconnected { await room.disconnect() }
                 guard generation == joinGeneration else { return }
-
-                // With the call switch on, iOS owns the audio session and it must be
-                // running before LiveKit touches the microphone.
-                if usesCallKit != call.isEnabled {
-                    try? await AudioManager.shared.setRecordingAlwaysPreparedMode(false)
-                    call.setEnabled(usesCallKit)
-                }
-                if usesCallKit {
-                    beganCall = !call.hasCall
-                    do {
-                        try await call.begin(boat: ticket.boat, options: sessionOptions)
-                    } catch {
-                        // Carry on as a plain audio app: sound matters more than the button.
-                        log.error("Call not started: \(String(describing: error), privacy: .public)")
-                        beganCall = false
-                        call.setEnabled(false)
-                    }
-                    guard generation == joinGeneration else { return }
-                }
 
                 let connect = ConnectOptions(reconnectAttempts: 60, isDscpEnabled: true)
                 let options = RoomOptions(
@@ -454,18 +390,16 @@ final class Intercom: NSObject, ObservableObject {
                 Preferences.channel = ticket.channel
                 joinTask = nil
                 phase = .connected
-                log.info("Joined \(ticket.boat, privacy: .public) on \(ticket.channel, privacy: .public), muted \(self.isMuted), microphone \(micStarted)")
+                log.info("Joined \(ticket.boat) on \(ticket.channel), muted \(self.isMuted), microphone \(micStarted)")
+                log.info("Audio after joining: \(audioSummary)")
                 tones.play(.joined)
-                call.showMuted(isMuted)
                 stateChanged()
             } catch {
                 guard generation == joinGeneration else { return }
-                log.error("Join failed: \(String(describing: error), privacy: .public)")
+                log.error("Join failed: \(String(describing: error))")
                 joinTask = nil
                 await room.disconnect()
                 guard generation == joinGeneration else { return }
-                // A call kept from before a lost link stays up: it keeps the app alive to rejoin.
-                if beganCall { call.end() }
                 phase = .looking
                 problem = "Could not join \(boat.name). \(error.localizedDescription)"
                 stateChanged()
@@ -496,7 +430,7 @@ final class Intercom: NSObject, ObservableObject {
             try? await AudioManager.shared.setRecordingAlwaysPreparedMode(true)
             return true
         } catch {
-            log.error("Microphone did not start: \(String(describing: error), privacy: .public)")
+            log.error("Microphone did not start: \(String(describing: error))")
             return false
         }
     }
@@ -560,7 +494,7 @@ final class Intercom: NSObject, ObservableObject {
 
     /// iOS noticed speech while the microphone is muted.
     private func mutedSpeech(_ event: SpeechActivityEvent) {
-        log.info("Speech while muted: \(String(describing: event), privacy: .public)")
+        log.info("Speech while muted: \(String(describing: event))")
         switch event {
         case .started:
             mutedSpeechSince = Date()
@@ -596,10 +530,11 @@ final class Intercom: NSObject, ObservableObject {
 
     /// A phone call or Siri took the audio: mute, and come back the way we were.
     private func audioInterrupted(_ type: AVAudioSession.InterruptionType?) {
+        log.info("Audio interrupted: \(type == .began ? "began" : "ended")")
         guard phase.isAboard else { return }
         switch type {
         case .began:
-            // A held call and an audio interruption can both report the same phone call.
+            // Two reports of the same interruption must not overwrite what to come back to.
             if mutedBeforeInterruption == nil { mutedBeforeInterruption = isMuted }
             setMuted(true)
         case .ended:
@@ -610,7 +545,18 @@ final class Intercom: NSObject, ObservableObject {
         }
     }
 
+    /// The state of the phone's audio, for the log.
+    private var audioSummary: String {
+        let session = AVAudioSession.sharedInstance()
+        let inputs = session.currentRoute.inputs.map(\.portType.rawValue).joined(separator: "+")
+        let outputs = session.currentRoute.outputs.map(\.portType.rawValue).joined(separator: "+")
+        return "engine \(AudioManager.shared.isEngineRunning ? "running" : "stopped"), "
+            + "\(session.category.rawValue)/\(session.mode.rawValue), \(Int(session.sampleRate)) Hz, "
+            + "in \(inputs.isEmpty ? "none" : inputs), out \(outputs.isEmpty ? "none" : outputs)"
+    }
+
     private func routeChanged(_ reason: AVAudioSession.RouteChangeReason?) {
+        log.info("Audio route changed, reason \(reason?.rawValue ?? 0): \(audioSummary)")
         guard reason == .oldDeviceUnavailable, phase.isAboard, !isMuted else { return }
         setMuted(true)
         show(.headsetGone, for: 10)
@@ -674,7 +620,7 @@ final class Intercom: NSObject, ObservableObject {
         case .disconnected:
             // Only react when we did not ask for it: joins and leaves change the phase first.
             guard phase.isAboard else { return }
-            log.error("Lost the boat: \(String(describing: self.room.disconnectError), privacy: .public)")
+            log.error("Lost the boat: \(String(describing: self.room.disconnectError))")
             phase = .looking
             problem = "Lost \(boatName). Rejoining when it is back in range."
             tones.play(.lost)
@@ -744,6 +690,9 @@ extension Intercom: RoomDelegate {
 
     nonisolated func room(_: Room, participant: Participant, didUpdateConnectionQuality quality: ConnectionQuality) {
         guard participant is LocalParticipant else { return }
-        Task { @MainActor in self.quality = quality }
+        Task { @MainActor in
+            if quality != self.quality { self.log.info("Connection quality \(String(describing: quality)): \(self.audioSummary)") }
+            self.quality = quality
+        }
     }
 }

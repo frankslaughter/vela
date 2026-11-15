@@ -30,17 +30,6 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Toggle("Headset button through a phone call", isOn: Binding(
-                        get: { intercom.usesCallKit },
-                        set: { intercom.setUsesCallKit($0) }
-                    ))
-                } header: {
-                    Text("Experimental")
-                } footer: {
-                    Text("Tells iOS the intercom is a phone call, so the button on a Bluetooth headset can toggle mute. The phone shows a call while you are on the boat, and other apps cannot play sound. Changing it rejoins the boat.")
-                }
-
-                Section {
                     LabeledContent("Microphone level", value: meter.levelDB <= -119 ? "Silent" : "\(Int(meter.levelDB.rounded())) dB")
                     LabeledContent("Gate", value: meter.isGateOpen ? "Open" : "Closed")
                 } header: {
