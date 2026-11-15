@@ -109,7 +109,7 @@ private struct MuteButton: View {
         case .ptt:
             return intercom.isTalking
                 ? Look(title: "TALKING", hint: "Release to stop", symbol: "mic.fill", color: Theme.live)
-                : Look(title: "HOLD TO TALK", hint: "Or press the headset button to latch", symbol: "mic.slash.fill", color: Theme.idle)
+                : Look(title: "HOLD TO TALK", hint: "Or use the lock-screen button to latch", symbol: "mic.slash.fill", color: Theme.idle)
         case .vox:
             if intercom.isMuted { return Look(title: "MUTED", hint: "Tap to unmute", symbol: "mic.slash.fill", color: Theme.muted) }
             return Look(title: "LIVE", hint: meter.isGateOpen ? "VOX: sending" : "VOX: waiting for your voice", symbol: "mic.fill", color: Theme.live)

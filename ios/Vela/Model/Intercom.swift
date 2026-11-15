@@ -62,7 +62,7 @@ final class Intercom: NSObject, ObservableObject {
     @Published private(set) var channel = ""
     @Published private(set) var isMuted = Preferences.isMuted
     @Published private(set) var mode = Preferences.mode
-    /// PTT only: the talk button is held, or the headset button latched it.
+    /// PTT only: the talk button is held, or a button press latched it.
     @Published private(set) var isTalking = false
     /// On the boat and listening, but iOS would not start the microphone.
     /// It refuses when the app is not on screen and has no audio already running.
@@ -90,7 +90,6 @@ final class Intercom: NSObject, ObservableObject {
     private let browser = BoatBrowser()
     private let gate = MicGate()
     private let tones = Tones()
-    private let headset = HeadsetButton()
     private let activity = ActivityController()
     private let call = CallSession()
     /// Read these in Console.app, filtered on the subsystem, when testing on a phone.
@@ -154,8 +153,6 @@ final class Intercom: NSObject, ObservableObject {
         }
         syncGate()
 
-        headset.onPress = { [weak self] in self?.buttonPressed() }
-        headset.start()
         MuteIntentBridge.handler = { [weak self] in self?.buttonPressed() }
         call.onEnded = { [weak self] in self?.callEndedByPhone() }
         call.onMuteRequested = { [weak self] muted in
@@ -339,7 +336,7 @@ final class Intercom: NSObject, ObservableObject {
         }
     }
 
-    /// The headset button or the lock-screen button: one press, no looking.
+    /// The lock-screen button, or the headset button when the call switch is on: one press, no looking.
     private func buttonPressed() {
         guard phase.isAboard else { return }
         if mode == .ptt {
@@ -363,7 +360,7 @@ final class Intercom: NSObject, ObservableObject {
     // MARK: - Joining
 
     private func tryAutoJoin() {
-        // iOS can start the app unseen, for example when a headset button is pressed after
+        // iOS can start the app unseen, for example from the lock-screen button after
         // the app was closed. It will not give that app a microphone, and it suspends it
         // within a minute, so joining would only put a ghost on the roster. Wait to be opened.
         if !hasBeenOnScreen { hasBeenOnScreen = UIApplication.shared.applicationState == .active }
@@ -647,13 +644,12 @@ final class Intercom: NSObject, ObservableObject {
         talkers = list
     }
 
-    /// Lock-screen Live Activity and the Now Playing card.
+    /// The lock-screen Live Activity.
     private func publishState() {
         guard wantedBoat != nil, !boatName.isEmpty else {
             cardRefreshTask?.cancel()
             cardRefreshTask = nil
             activity.endAll()
-            headset.clear()
             return
         }
         // The card expires unless refreshed, so a crashed app cannot leave "Live" on the lock screen.
@@ -669,8 +665,6 @@ final class Intercom: NSObject, ObservableObject {
         let connected = phase == .connected
         activity.show(boat: boatName,
                       state: .init(isMuted: isSilent, isConnected: connected, channel: channel, mode: mode.label))
-        headset.show(title: !connected ? "Not connected" : (isSilent ? "Muted" : "Live"),
-                     subtitle: "\(boatName) · \(channel)")
     }
 
     // MARK: - Connection events
