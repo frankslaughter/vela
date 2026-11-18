@@ -70,6 +70,8 @@ extension Intercom {
             "muted": isMuted,
             "headset_muted": isHeadsetMuted,
             "mic_unavailable": isMicUnavailable,
+            "silence_suppression": suppressesSilence,
+            "redundancy": sendsRedundancy,
             "app_state": app.applicationState == .active ? "active" : (app.applicationState == .background ? "background" : "inactive"),
             // True a few seconds after the phone locks, on a phone with a passcode.
             "locked": !app.isProtectedDataAvailable,
@@ -84,11 +86,13 @@ extension Intercom {
         if device.batteryLevel >= 0 { report["battery"] = Double(device.batteryLevel) }
         testMicPeakDB = -120
 
-        // What this phone's own microphone track has put on the wire.
-        if let sent = room.localParticipant.audioTracks.first?.track?.statistics?.outboundRtpStream.first,
-           let packets = sent.packetsSent
-        {
-            report["sent"] = ["packets": packets]
+        // What this phone's own microphone track has put on the wire, and how much of it the
+        // audio server says never arrived. Both counts start again with each join.
+        let statistics = room.localParticipant.audioTracks.first?.track?.statistics
+        if let packets = statistics?.outboundRtpStream.first?.packetsSent {
+            var sent: [String: Any] = ["packets": packets]
+            if let lost = statistics?.remoteInboundRtpStream.first?.packetsLost { sent["lost"] = lost }
+            report["sent"] = sent
         }
 
         // What has arrived from each person this phone is listening to. The counts only ever grow;

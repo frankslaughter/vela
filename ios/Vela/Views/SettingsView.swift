@@ -41,6 +41,21 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("Silence suppression", isOn: Binding(
+                        get: { intercom.suppressesSilence },
+                        set: { intercom.setSuppressesSilence($0) }
+                    ))
+                    Toggle("Redundancy", isOn: Binding(
+                        get: { intercom.sendsRedundancy },
+                        set: { intercom.setSendsRedundancy($0) }
+                    ))
+                } header: {
+                    Text("Sending")
+                } footer: {
+                    Text("Leave both on. They are here to find out why packets go missing. Silence suppression sends almost nothing while you are quiet. Redundancy repeats each packet in the next one. Changing either rejoins the boat.")
+                }
+
+                Section {
                     LabeledContent("Microphone level", value: meter.levelDB <= -119 ? "Silent" : "\(Int(meter.levelDB.rounded())) dB")
                     LabeledContent("Gate", value: meter.isGateOpen ? "Open" : "Closed")
                 } header: {

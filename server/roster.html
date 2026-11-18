@@ -161,7 +161,7 @@ async function refresh() {
         if (!p.voice) total += 1; // a test voice from the Mac is not a person
         const li = el("li", p.muted ? "is-muted" : "");
         li.dataset.id = p.identity;
-        li.dataset.state = p.voice ? "Test voice" : p.headset_muted ? "Muted on headset" : (p.muted ? "Muted" : "Live");
+        li.dataset.state = p.voice ? "Test voice" : p.mic_off ? "No microphone" : p.headset_muted ? "Muted on headset" : (p.muted ? "Muted" : "Live");
         const bars = el("span", "bars");
         bars.append(el("i"), el("i"), el("i"));
         const who = el("span", "who");

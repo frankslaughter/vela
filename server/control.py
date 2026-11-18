@@ -294,15 +294,18 @@ async def channel_roster(lk: api.LiveKitAPI, channel: str) -> list[dict]:
         if p.identity == MONITOR_IDENTITY or p.permission.hidden:
             continue  # our own listening seat
         mics = [t for t in p.tracks if t.source == api.TrackSource.MICROPHONE]
-        # The phone's own report that the headset is sending silence: a mute on its boom.
-        headset_muted = p.attributes.get("mic") == "headset-muted"
+        # The phone's own report on its microphone: "headset-muted" when the headset is sending
+        # silence, a mute on its boom; "off" when the microphone is not delivering audio at all.
+        mic = p.attributes.get("mic")
+        headset_muted = mic == "headset-muted"
         people.append(
             {
                 "identity": p.identity,
                 "name": p.name or p.identity,
                 # No published mic counts as muted: nothing of theirs can be heard.
-                "muted": headset_muted or not mics or all(t.muted for t in mics),
+                "muted": headset_muted or mic == "off" or not mics or all(t.muted for t in mics),
                 "headset_muted": headset_muted,
+                "mic_off": mic == "off",
                 # A test voice from the Mac, not a person.
                 "voice": p.identity.startswith(VOICE_PREFIX),
                 "joined_at": p.joined_at,
@@ -338,7 +341,8 @@ async def activity() -> dict:
 
 @app.get("/")
 async def roster_page() -> FileResponse:
-    return FileResponse(HERE / "roster.html")
+    # no-cache: the browser must ask each time whether the page has changed, or it shows an old one after an update.
+    return FileResponse(HERE / "roster.html", headers={"Cache-Control": "no-cache"})
 
 
 # ---- Test bench: one person testing several phones. See testbench.py. ----
@@ -423,4 +427,4 @@ async def test_log(device_id: str) -> str:
 
 @app.get("/test")
 async def test_page() -> FileResponse:
-    return FileResponse(HERE / "test.html")
+    return FileResponse(HERE / "test.html", headers={"Cache-Control": "no-cache"})

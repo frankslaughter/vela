@@ -22,9 +22,11 @@ The page is at `http://<the Mac's name>.local:7890/test`. `server/start.sh` prin
 For each phone:
 
 - **Chips**: on the boat or not, locked or on screen, headset or phone microphone, battery, link quality, and the mute state.
-- **Sending**: whether its microphone track is putting packets on the wire, and whether the audio server hears it talking. A muted phone shows "stopped"; that is correct.
+- **Sending**: whether its microphone track is putting packets on the wire, and whether the audio server hears it talking. A phone muted in the app still shows "flowing": it goes on sending packets of silence, and the audio server stops passing them on, so the other phones' "Hearing" lines for it show "stopped". A phone with no working microphone shows "stopped" here. The "Lost" figure on this line is the share of the phone's own packets, since it joined, that the audio server says never arrived.
 - **Hearing**: one line for each person or voice on its channel. "Packets" says whether audio is arriving. "Sound" is the level of what arrived and when something audible was last heard. "Lost" is packets that never came. "Patched over" is the share of audio the phone had to invent to cover them.
 - **Buttons**: Mute, Unmute, Next mode and Next channel act on that phone within two seconds. Log opens the phone's own log.
+
+A phone whose Settings have **Silence suppression** or **Redundancy** switched off, under Sending, shows a chip saying so. Both should be on except for the test below.
 
 A phone that has not reported for seven seconds is shown as not reporting, with no numbers, because old numbers would look like good news. That is what a phone looks like when iOS has suspended the app, which is the thing the pocket test is looking for.
 
@@ -39,11 +41,26 @@ A run saves every report for its length and ends with a verdict for each phone. 
 
 Each run leaves a folder under `server/logs/runs/`, named by its start time:
 
-- `report.md`: the verdict and the numbers, readable as it is.
+- `report.md`: the verdict and the numbers, readable as it is. "Lost on the way" is the share of each phone's own packets that never reached the audio server; it does not decide pass or fail.
 - `summary.json` and `samples.jsonl`: the same, and every report, for a closer look.
 - `recordings/`: one WAV file for each phone's microphone, if recording was on. Stretches with no audio at all are left out, so a file can be shorter than the run.
 
 Phone logs arrive every ten seconds while Test mode is on, in `server/logs/phones/`. Nothing under `server/logs/` is kept in git.
+
+## Finding the lost packets
+
+On 2026-11-16 about half the iPad's packets never reached the audio server, mostly in quiet stretches; see `docs/stage-1-log.md`. To find out whether silence suppression or redundancy is behind it:
+
+Use the iPad on its own microphone in a quiet room, which is where the loss was seen. The iPhone Air on a headset lost nothing on 2026-11-17.
+
+Result, 2026-11-17: neither phone lost anything in any of the three settings, so the settings are not the cause. The sessions that did lose packets had been muted; see `docs/stage-1-log.md`. A mute in mid-session and a muted join were both clean the same evening. So was a muted start, on both phones. The loss is unexplained and has not been seen since 2026-11-16; "Lost" on the Sending line is how it will be noticed if it comes back.
+
+1. Join with one phone, unmuted, Test mode on. Talk for a minute with pauses, and note "Lost" on its Sending line.
+2. In the phone's Settings, under Sending, turn **Silence suppression** off. The phone rejoins and the count starts again. Do the same minute and note the figure.
+3. Turn it back on, turn **Redundancy** off, and do the minute again.
+4. Turn both back on.
+
+A recorded run during each minute keeps the microphone audio, to hear whether word beginnings are clipped.
 
 ## How it works
 
@@ -56,6 +73,7 @@ Phone logs arrive every ten seconds while Test mode is on, in `server/logs/phone
 
 - **What it cannot judge.** How the intercom sounds to a person, beyond the one headset you wear, and two real people talking near each other.
 - **Locked.** A phone reports itself locked only if it has a passcode, and about ten seconds after it locks.
+- **An iPad in a case.** Closing a keyboard case or cover cuts the iPad's microphone in hardware and suspends the app. Lock an iPad with its top button and leave the case open.
 - **Test voices are heard by everyone on the channel.** Stop them before real people use the intercom.
 - **No protection.** The control service has no authentication, so anyone on the same network can mute a phone that has Test mode on. Fine at home; turn Test mode off at the dock.
 - **Recordings are of people's voices.** They are only made when the box is ticked, and they stay on the Mac.
@@ -63,4 +81,10 @@ Phone logs arrive every ten seconds while Test mode is on, in `server/logs/phone
 
 ## Checked so far
 
-On 2026-11-15, on spare ports: two scripted stand-ins for phones and the app in the simulator all reported, heard each other and the test voice, obeyed a command, and uploaded a log; a 30-second recorded run passed and wrote its report and recordings. Not yet tried with real phones.
+On 2026-11-15, on spare ports: two scripted stand-ins for phones and the app in the simulator all reported, heard each other and the test voice, obeyed a command, and uploaded a log; a 30-second recorded run passed and wrote its report and recordings.
+
+The same evening, a first five-minute run with the iPhone Air and the iPad: both reported, Mute and Unmute from the page reached the iPad, both logs arrived, and both microphones were recorded. The run failed, correctly, because the iPad went silent for 69 seconds; see `docs/stage-1-log.md`. The test voices were off for that run, so it did not check hearing.
+
+On 2026-11-16, in the simulator on spare ports: the two Sending switches were read, logged and shown on the page, and the page showed the phone's own loss as 0%. The simulator has no real microphone, so whether switching silence suppression off changes what a phone sends is not checked.
+
+On 2026-11-17 the first try on the iPhone Air showed that the Silence suppression switch had no effect; see `docs/stage-1-log.md`. After the fix, in the simulator on spare ports, the audio server's answer left silence suppression off when the switch was off. Not yet tried on a phone.

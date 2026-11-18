@@ -73,4 +73,16 @@ enum Preferences {
         get { store.bool(forKey: "isTestMode") }
         set { store.set(newValue, forKey: "isTestMode") }
     }
+
+    /// Silence suppression (DTX): send almost nothing while the microphone is quiet. On unless switched off for a test.
+    static var suppressesSilence: Bool {
+        get { !store.bool(forKey: "noSilenceSuppression") }
+        set { store.set(!newValue, forKey: "noSilenceSuppression") }
+    }
+
+    /// Redundancy (RED): each packet repeats the one before, to cover a lost packet. On unless switched off for a test.
+    static var sendsRedundancy: Bool {
+        get { !store.bool(forKey: "noRedundancy") }
+        set { store.set(!newValue, forKey: "noRedundancy") }
+    }
 }

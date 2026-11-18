@@ -57,7 +57,7 @@ final class LogFile: @unchecked Sendable {
         _ = try? handle?.seekToEnd()
 
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-        let day = Date().formatted(.iso8601.year().month().day())
+        let day = Date().formatted(Date.ISO8601FormatStyle(timeZone: .current).year().month().day()) // the phone's own date, not Greenwich's
         write("app", "=== Vela \(version) started \(day) ===")
     }
 

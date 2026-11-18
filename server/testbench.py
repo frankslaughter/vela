@@ -84,9 +84,17 @@ class TestBench:
         sent = report.get("sent") or {}
         before = (previous.get("sent") or {}).get("packets")
         packets = sent.get("packets")
+        # The phone's counts start again with each join, so a count that went down is a fresh start.
+        lost, lost_before = sent.get("lost"), (previous.get("sent") or {}).get("lost")
+        fresh = before is None or packets is None or packets < before
         device["sent"] = {
             "flowing": packets is not None and before is not None and packets > before,
             "known": packets is not None,
+            # Since the last report: packets sent, and how many of them the audio server says never arrived.
+            "packets": 0 if fresh else packets - before,
+            "lost": 0 if fresh or lost is None or lost_before is None else max(lost - lost_before, 0),
+            # Since joining.
+            "loss": (max(lost, 0) / packets) if packets and lost is not None else None,
         }
 
         # Hearing: for each person the phone is subscribed to, what arrived since the last report.
@@ -345,6 +353,10 @@ class TestBench:
                 "drops": report.get("drops"),
                 "joins": report.get("joins"),
                 "sending": device["sent"]["flowing"],
+                "sent_packets": device["sent"]["packets"],
+                "sent_lost": device["sent"]["lost"],
+                "silence_suppression": report.get("silence_suppression"),
+                "redundancy": report.get("redundancy"),
                 "hearing": {
                     identity: {
                         "voice": h["voice"],
@@ -417,6 +429,13 @@ class TestBench:
                     "locked": fraction([s for s in samples if s["locked"]]),
                     "in_background": fraction([s for s in samples if s["app"] != "active"]),
                     "sending": fraction([s for s in samples if s["sending"]]),
+                    "sent_loss": (
+                        sum(s.get("sent_lost") or 0 for s in samples) / sum(s.get("sent_packets") or 0 for s in samples)
+                        if sum(s.get("sent_packets") or 0 for s in samples)
+                        else None
+                    ),
+                    "silence_suppression": samples[-1].get("silence_suppression"),
+                    "redundancy": samples[-1].get("redundancy"),
                     "talking_seconds": run["talking"].get(device_id, 0),
                     "drops": (drops[-1] - drops[0]) if drops else None,
                     "battery_start": batteries[0] if batteries else None,
@@ -450,16 +469,20 @@ class TestBench:
             "",
             f"**Result: {'pass' if summary['passed'] else 'fail' if summary['phones'] else 'no phones reported'}**",
             "",
-            "| Phone | Result | On the boat | Locked | Sending | Longest report gap | Lost the boat | Battery |",
-            "|---|---|---|---|---|---|---|---|",
+            "| Phone | Result | On the boat | Locked | Sending | Lost on the way | Longest report gap | Lost the boat | Battery |",
+            "|---|---|---|---|---|---|---|---|---|",
         ]
         for p in summary["phones"]:
             battery = (
                 f"{p['battery_start']:.0%} to {p['battery_end']:.0%}" if p["battery_start"] is not None else "unknown"
             )
+            sent_loss = f"{p['sent_loss']:.1%}" if p.get("sent_loss") is not None else "unknown"
+            if p.get("silence_suppression") is False or p.get("redundancy") is False:
+                off = [n for n, k in (("silence suppression", "silence_suppression"), ("redundancy", "redundancy")) if p.get(k) is False]
+                sent_loss += f" ({' and '.join(off)} off)"
             lines.append(
                 f"| {p['name']} | {'Pass' if p['passed'] else 'Fail: ' + '; '.join(p['problems'])} "
-                f"| {p['connected']:.1%} | {p['locked']:.0%} | {p['sending']:.0%} "
+                f"| {p['connected']:.1%} | {p['locked']:.0%} | {p['sending']:.0%} | {sent_loss} "
                 f"| {p['longest_report_gap']:.0f} s | {p['drops'] if p['drops'] is not None else 'unknown'} | {battery} |"
             )
         lines += ["", "## What each phone heard", "", "| Phone | From | Packets flowing | Longest gap | Lost | Patched over |", "|---|---|---|---|---|---|"]
@@ -478,6 +501,7 @@ class TestBench:
             f" at least {MIN_CONNECTED:.0%} of the time, never lost the boat, and never went more than"
             f" {MAX_HEARING_GAP:.0f} s without packets from a test voice.",
             "\"Patched over\" is the share of audio the phone had to invent to cover missing packets.",
+            "\"Lost on the way\" is the share of the phone's own packets that the audio server says never arrived. It does not decide pass or fail.",
             "",
         ]
         return "\n".join(lines)
@@ -538,6 +562,9 @@ class TestBench:
                     "mic_level_db": report.get("mic_level_db"),
                     "version": report.get("version"),
                     "sending": device["sent"].get("flowing", False),
+                    "sent_loss": device["sent"].get("loss"),
+                    "silence_suppression": report.get("silence_suppression"),
+                    "redundancy": report.get("redundancy"),
                     "talking": device_id in self.speaking,
                     "hearing": hearing,
                     "commands_waiting": len(self.commands.get(device_id, [])),

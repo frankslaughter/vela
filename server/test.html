@@ -135,6 +135,8 @@ function phoneCard(p) {
   if (p.quality) chips.append(chip("Link " + p.quality, p.quality === "poor" || p.quality === "lost" ? "bad" : ""));
   const mic = p.mic_unavailable ? "Microphone off" : p.headset_muted ? "Muted on headset" : p.muted ? "Muted" : "Live";
   chips.append(chip(mic, mic === "Live" ? "good" : ""));
+  if (p.silence_suppression === false) chips.append(chip("Silence suppression off"));
+  if (p.redundancy === false) chips.append(chip("Redundancy off"));
   if (p.commands_waiting) chips.append(chip(p.commands_waiting + " command waiting"));
   sec.append(chips);
 
@@ -148,7 +150,8 @@ function phoneCard(p) {
   sendRow.append(el("td", null, "Sending"),
                  el("td", p.sending ? "ok" : "no", p.sending ? "flowing" : "stopped"),
                  el("td", p.talking ? "ok" : "dim", p.talking ? "boat hears talking" : (p.mic_level_db === null || p.mic_level_db === undefined ? "quiet" : "mic " + Math.round(p.mic_level_db) + " dB")),
-                 el("td", "dim", ""), el("td", "dim", ""));
+                 el("td", p.sent_loss > 0.02 ? "no" : "dim", percent(p.sent_loss)),
+                 el("td", "dim", "–"));
   table.append(sendRow);
 
   if (!p.hearing.length) {

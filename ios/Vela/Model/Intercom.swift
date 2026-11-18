@@ -25,7 +25,7 @@ enum Notice: Equatable {
         case .youreMuted: "You're muted"
         case .deadMic: "Your microphone is sending silence. Check that it is working."
         case .headsetGone: "Headset disconnected. You have been muted."
-        case .micUnavailable: "Listening only. Your microphone has not started. Tap the big button to try again."
+        case .micUnavailable: "Listening only. Your microphone is not working. Tap the big button to try again."
         }
     }
 }
@@ -64,8 +64,9 @@ final class Intercom: NSObject, ObservableObject {
     @Published private(set) var mode = Preferences.mode
     /// PTT only: the talk button is held, or a button press latched it.
     @Published private(set) var isTalking = false
-    /// On the boat and listening, but iOS would not start the microphone.
-    /// It refuses when the app is not on screen and has no audio already running.
+    /// On the boat and listening, but the microphone is not delivering audio. iOS refuses to
+    /// start it for an app that is not on screen, and takes it away for a phone call, or when
+    /// an iPad's case is closed.
     @Published private(set) var isMicUnavailable = false
     /// The headset is sending pure silence, which is what a mute button on its boom does.
     /// The phone is never told about that mute, so it is inferred, and treated as a real one.
@@ -81,6 +82,9 @@ final class Intercom: NSObject, ObservableObject {
     @Published private(set) var usesSpeakerWithoutHeadset = Preferences.usesSpeakerWithoutHeadset
     /// Reporting to the base station's test bench and taking its commands. See `Intercom+Testing.swift`.
     @Published private(set) var isTestMode = Preferences.isTestMode
+    /// How the microphone's audio is sent. Both are on for normal use; the switches are for finding lost packets.
+    @Published private(set) var suppressesSilence = Preferences.suppressesSilence
+    @Published private(set) var sendsRedundancy = Preferences.sendsRedundancy
     /// The boat to be on. Set by choosing one, cleared by leaving.
     @Published private(set) var wantedBoat = Preferences.boatName
 
@@ -110,6 +114,15 @@ final class Intercom: NSObject, ObservableObject {
     private var isTalkHeld = false
     private var isTalkLatched = false
     private var mutedSpeechSince: Date?
+    /// When the microphone last delivered audio. It does so five times a second while live.
+    private var lastGateReport = Date()
+    private var micWatchTask: Task<Void, Never>?
+    private var lastMicRecovery = Date.distantPast
+    /// Seconds between attempts to get a stopped microphone back. Doubles after each, up to a minute.
+    private var micRecoveryDelay: Double = 10
+    /// Recovery normally waits for the app to be on screen, where iOS allows a microphone to
+    /// start. Just after an interruption ends, or a microphone reappears, it may try unseen.
+    private var mayRecoverUnseenUntil = Date.distantPast
     var testTask: Task<Void, Never>?
     /// For the test bench: how often this phone has joined, and lost the boat without being asked.
     private(set) var joinCount = 0
@@ -173,7 +186,12 @@ final class Intercom: NSObject, ObservableObject {
         let center = NotificationCenter.default
         center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-            Task { @MainActor in self?.audioInterrupted(raw.flatMap(AVAudioSession.InterruptionType.init)) }
+            let reason = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt
+            let options = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
+            Task { @MainActor in
+                self?.log.info("Interruption notice: reason \(reason.map(String.init) ?? "none"), options \(options.map(String.init) ?? "none")")
+                self?.audioInterrupted(raw.flatMap(AVAudioSession.InterruptionType.init))
+            }
         }
         center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
@@ -195,6 +213,12 @@ final class Intercom: NSObject, ObservableObject {
 
         phase = displayName.isEmpty ? .needsName : .looking
         UIDevice.current.isBatteryMonitoringEnabled = true
+        micWatchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                self?.checkMicrophone()
+            }
+        }
         startTestReports()
     }
 
@@ -212,7 +236,9 @@ final class Intercom: NSObject, ObservableObject {
         hasBeenOnScreen = true
         publishState() // a Live Activity can only be started from the foreground
         retryDelay = 3
-        retryMicrophone() // and so can the microphone
+        // Being opened is proof that whatever interrupted the audio is over, told or not.
+        if mutedBeforeInterruption != nil { audioInterrupted(.ended) }
+        recoverMicrophone("the app came on screen", force: true) // only here will iOS start a microphone
         tryAutoJoin()
     }
 
@@ -322,6 +348,21 @@ final class Intercom: NSObject, ObservableObject {
         if phase.isAboard, let boat = currentBoat { join(boat, channel: channel) }
     }
 
+    /// Takes effect by rejoining, because the microphone's track is published with these settings.
+    func setSuppressesSilence(_ on: Bool) {
+        guard on != suppressesSilence else { return }
+        suppressesSilence = on
+        Preferences.suppressesSilence = on
+        if phase.isAboard, let boat = currentBoat { join(boat, channel: channel) }
+    }
+
+    func setSendsRedundancy(_ on: Bool) {
+        guard on != sendsRedundancy else { return }
+        sendsRedundancy = on
+        Preferences.sendsRedundancy = on
+        if phase.isAboard, let boat = currentBoat { join(boat, channel: channel) }
+    }
+
     func setUsesSpeakerWithoutHeadset(_ on: Bool) {
         usesSpeakerWithoutHeadset = on
         Preferences.usesSpeakerWithoutHeadset = on
@@ -374,7 +415,9 @@ final class Intercom: NSObject, ObservableObject {
         }
     }
 
-    private func join(_ boat: Boat, channel requested: String? = nil) {
+    /// `restartingAudio` also stops the microphone pipeline that is otherwise kept warm between
+    /// connections, so the audio engine and session start again from nothing.
+    private func join(_ boat: Boat, channel requested: String? = nil, restartingAudio: Bool = false) {
         joinGeneration += 1
         let generation = joinGeneration
         joinTask?.cancel()
@@ -396,12 +439,13 @@ final class Intercom: NSObject, ObservableObject {
                 guard generation == joinGeneration else { return }
 
                 if room.connectionState != .disconnected { await room.disconnect() }
+                if restartingAudio { try? await AudioManager.shared.setRecordingAlwaysPreparedMode(false) }
                 guard generation == joinGeneration else { return }
 
                 let connect = ConnectOptions(reconnectAttempts: 60, isDscpEnabled: true)
                 let options = RoomOptions(
                     defaultAudioCaptureOptions: AudioCaptureOptions(echoCancellation: true, autoGainControl: true, noiseSuppression: true),
-                    defaultAudioPublishOptions: AudioPublishOptions(encoding: AudioEncoding(maxBitrate: 32000), dtx: true, red: true),
+                    defaultAudioPublishOptions: micPublishOptions,
                     reportRemoteTrackStatistics: isTestMode // what this phone hears, for the test bench
                 )
                 try await room.connect(url: ticket.livekitURL, token: ticket.token, connectOptions: connect, roomOptions: options)
@@ -427,9 +471,12 @@ final class Intercom: NSObject, ObservableObject {
                 Preferences.channel = ticket.channel
                 joinTask = nil
                 joinCount += 1
+                lastGateReport = Date()
                 phase = .connected
+                publishMicState()
                 log.info("Joined \(ticket.boat) on \(ticket.channel), muted \(self.isMuted), microphone \(micStarted)")
                 log.info("Audio after joining: \(audioSummary)")
+                log.info("Sending with silence suppression \(suppressesSilence ? "on" : "off"), redundancy \(sendsRedundancy ? "on" : "off")")
                 tones.play(.joined)
                 stateChanged()
             } catch {
@@ -461,7 +508,10 @@ final class Intercom: NSObject, ObservableObject {
         #endif
         do {
             // The gate is already closed if muted, so nothing leaks between publishing and muting.
-            try await room.localParticipant.setMicrophone(enabled: true)
+            // The options are passed here as well as in the room's defaults. Left to the defaults,
+            // the SDK (2.19.0) follows up with a list of the track's features that leaves them out,
+            // and the audio server then switches silence suppression back on.
+            try await room.localParticipant.setMicrophone(enabled: true, publishOptions: micPublishOptions)
             if isMuted { try await room.localParticipant.setMicrophone(enabled: false) }
             // Keeps the microphone pipeline warm between connections, which also keeps
             // the app alive in a pocket while it waits for the boat to come back.
@@ -474,18 +524,66 @@ final class Intercom: NSObject, ObservableObject {
         }
     }
 
-    /// Tries again for a microphone that would not start. Called when the app comes on screen.
-    private func retryMicrophone() {
-        guard isMicUnavailable, phase == .connected else { return }
-        let generation = joinGeneration
-        Task {
-            guard await startMicrophone(), generation == joinGeneration else { return }
-            log.info("Microphone started")
-            isMicUnavailable = false
-            if notice == .micUnavailable { notice = nil }
-            syncGate()
-            stateChanged()
+    // MARK: - Watching the microphone
+
+    /// Every two seconds: is the microphone still delivering audio? Nothing else says so reliably.
+    /// An interruption or a lost input stops it without an error, and the screen would go on saying LIVE.
+    private func checkMicrophone() {
+        guard phase == .connected else {
+            lastGateReport = Date()
+            return
         }
+        let isOnScreen = UIApplication.shared.applicationState == .active
+        if isMicUnavailable {
+            if isOnScreen || Date() < mayRecoverUnseenUntil { recoverMicrophone("it is still off") }
+            return
+        }
+        // A muted microphone delivers nothing, so there is nothing to watch.
+        guard !isMuted else {
+            lastGateReport = Date()
+            return
+        }
+        guard Date().timeIntervalSince(lastGateReport) > 5 else { return }
+
+        log.error("The microphone stopped delivering audio: \(audioSummary)")
+        isMicUnavailable = true
+        isHeadsetMuted = false
+        notice = .micUnavailable
+        tones.play(.warning)
+        publishMicState()
+        stateChanged()
+        if isOnScreen || Date() < mayRecoverUnseenUntil { recoverMicrophone("it stopped") }
+    }
+
+    /// Gets a stopped microphone back by leaving and rejoining with the audio started from nothing.
+    /// Nothing gentler is known to work after an interruption.
+    private func recoverMicrophone(_ why: String, force: Bool = false) {
+        guard isMicUnavailable, phase == .connected, let boat = currentBoat else { return }
+        guard force || Date().timeIntervalSince(lastMicRecovery) >= micRecoveryDelay else { return }
+        lastMicRecovery = Date()
+        micRecoveryDelay = min(micRecoveryDelay * 2, 60)
+        log.info("Restarting the audio to get the microphone back: \(why)")
+        join(boat, channel: channel, restartingAudio: true)
+    }
+
+    /// Tells the boat what state the microphone is in, without touching the audio.
+    /// The roster and the other phones show anything but "live" as muted.
+    private func publishMicState() {
+        guard room.connectionState == .connected else { return }
+        let value = isMicUnavailable ? "off" : (isHeadsetMuted ? "headset-muted" : "live")
+        let room = room, log = log
+        Task {
+            do {
+                try await room.localParticipant.set(attributes: ["mic": value])
+            } catch {
+                log.error("The boat was not told the microphone is \(value): \(String(describing: error))")
+            }
+        }
+    }
+
+    /// How the microphone's audio is encoded and sent.
+    private var micPublishOptions: AudioPublishOptions {
+        AudioPublishOptions(encoding: AudioEncoding(maxBitrate: 32000), dtx: suppressesSilence, red: sendsRedundancy)
     }
 
     /// Hands-free profile only: it is what gives us the headset's microphone.
@@ -514,13 +612,15 @@ final class Intercom: NSObject, ObservableObject {
     /// value, so quick presses settle on the right answer.
     private func applyMicState() {
         guard room.connectionState == .connected, !isMicUnavailable else { return }
-        Task { try? await room.localParticipant.setMicrophone(enabled: !self.isMuted) }
+        Task { try? await room.localParticipant.setMicrophone(enabled: !self.isMuted, publishOptions: self.micPublishOptions) }
     }
 
     private func gateReported(_ report: MicGate.Report) {
         meter.levelDB = report.levelDB
         meter.isGateOpen = report.isOpen
 
+        lastGateReport = Date()
+        if !isMicUnavailable { micRecoveryDelay = 10 }
         logLevels(report)
         testMicPeakDB = max(testMicPeakDB, report.levelDB)
 
@@ -557,18 +657,8 @@ final class Intercom: NSObject, ObservableObject {
         guard muted != isHeadsetMuted else { return }
         isHeadsetMuted = muted
         log.info("Headset mute \(muted ? "on" : "off")")
-        // Tell the boat, without touching the audio: muting the track would also blind the
-        // check that notices the headset coming back.
-        if room.connectionState == .connected {
-            let room = room, log = log
-            Task {
-                do {
-                    try await room.localParticipant.set(attributes: ["mic": muted ? "headset-muted" : "live"])
-                } catch {
-                    log.error("The boat was not told about the headset mute: \(String(describing: error))")
-                }
-            }
-        }
+        // The audio track is left alone: muting it would blind the check that notices the headset coming back.
+        publishMicState()
         stateChanged()
     }
 
@@ -644,6 +734,9 @@ final class Intercom: NSObject, ObservableObject {
         case .ended:
             if mutedBeforeInterruption == false { setMuted(false) }
             mutedBeforeInterruption = nil
+            // The microphone may not have come back with it. The watch finds out within seconds.
+            lastGateReport = Date()
+            mayRecoverUnseenUntil = Date().addingTimeInterval(25)
         default:
             break
         }
@@ -661,6 +754,12 @@ final class Intercom: NSObject, ObservableObject {
 
     private func routeChanged(_ reason: AVAudioSession.RouteChangeReason?) {
         log.info("Audio route changed, reason \(reason?.rawValue ?? 0): \(audioSummary)")
+        if !AVAudioSession.sharedInstance().currentRoute.inputs.isEmpty {
+            // A microphone is there. If an interruption took it away and iOS never said it was
+            // over, as happens when an iPad's case is closed and opened, this is the sign that it is.
+            if mutedBeforeInterruption != nil, phase.isAboard { audioInterrupted(.ended) }
+            if isMicUnavailable { mayRecoverUnseenUntil = Date().addingTimeInterval(25) }
+        }
         guard reason == .oldDeviceUnavailable, phase.isAboard, !isMuted else { return }
         setMuted(true)
         show(.headsetGone, for: 10)
@@ -688,7 +787,7 @@ final class Intercom: NSObject, ObservableObject {
             list.append(Talker(id: person.identity?.stringValue ?? UUID().uuidString,
                                name: person.name?.isEmpty == false ? person.name! : "Someone",
                                isSpeaking: person.isSpeaking,
-                               isMuted: !person.isMicrophoneEnabled() || person.attributes["mic"] == "headset-muted",
+                               isMuted: !person.isMicrophoneEnabled() || ["headset-muted", "off"].contains(person.attributes["mic"] ?? ""),
                                isLocal: false))
         }
         talkers = list
@@ -742,12 +841,14 @@ final class Intercom: NSObject, ObservableObject {
 
     private func reconnecting(_ isReconnecting: Bool) {
         if isReconnecting, phase == .connected {
+            log.error("The link dropped; reconnecting. Link quality was \(String(describing: quality))")
             phase = .reconnecting
             stateChanged()
         } else if !isReconnecting, phase == .reconnecting {
+            log.info("The link is back")
             phase = .connected
+            lastGateReport = Date()
             applyMicState()
-            retryMicrophone()
             stateChanged()
         }
     }
