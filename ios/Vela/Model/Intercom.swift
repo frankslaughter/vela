@@ -114,7 +114,7 @@ final class Intercom: NSObject, ObservableObject {
     private var retryDelay: Double = 3
     private var isTalkHeld = false
     private var isTalkLatched = false
-    private var mutedSpeechSince: Date?
+    private var mutedTalk = MutedSpeechTally()
     /// When the microphone last delivered audio. It does so five times a second while live.
     private var lastGateReport = Date()
     private var micWatchTask: Task<Void, Never>?
@@ -319,7 +319,7 @@ final class Intercom: NSObject, ObservableObject {
         isMuted = muted
         Preferences.isMuted = muted
         log.info("Muted \(muted)")
-        mutedSpeechSince = nil
+        mutedTalk.reset()
         lastReminder = .distantPast // each new mute earns its own reminder
         if !muted, notice == .youreMuted { notice = nil }
         syncGate()
@@ -757,24 +757,29 @@ final class Intercom: NSObject, ObservableObject {
     /// iOS noticed speech while the microphone is muted.
     private func mutedSpeech(_ event: SpeechActivityEvent) {
         log.info("Speech while muted: \(String(describing: event))")
+        // iOS ends a stretch of speech at every small pause, so the stretches are added up.
+        let now = Date()
         switch event {
         case .started:
-            mutedSpeechSince = Date()
+            mutedTalk.started(at: now)
+            let wait = mutedTalk.remaining(at: now)
             Task { [weak self] in
-                try? await Task.sleep(for: .seconds(2))
-                self?.remindIfStillTalking()
+                try? await Task.sleep(for: .seconds(wait))
+                self?.remindIfTalkedEnough()
             }
         case .ended:
-            mutedSpeechSince = nil
+            mutedTalk.ended(at: now)
+            remindIfTalkedEnough()
         }
     }
 
-    private func remindIfStillTalking() {
-        guard isMuted, phase.isAboard, let since = mutedSpeechSince,
-              Date().timeIntervalSince(since) >= 1.9,
-              Date().timeIntervalSince(lastReminder) >= 60 // once, then quiet for a minute or until the next mute
+    private func remindIfTalkedEnough() {
+        let now = Date()
+        guard isMuted, phase.isAboard, mutedTalk.isEnough(at: now),
+              now.timeIntervalSince(lastReminder) >= 60 // once, then quiet for a minute or until the next mute
         else { return }
-        lastReminder = Date()
+        lastReminder = now
+        mutedTalk.reset()
         log.info("Reminding: you're muted")
         show(.youreMuted, for: 6)
         tones.say("You're muted", after: .reminder)

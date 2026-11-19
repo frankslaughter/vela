@@ -2,7 +2,7 @@
 
 Started 2026-11-14. Done when exit criteria 1 and 3 pass: four phones in full duplex on Bluetooth headsets for 30 minutes, locked and in pockets, and mute from the lock screen (the headset button was dropped, see Known limits) with in-ear confirmation and the "you're muted" reminder.
 
-**Status: built and checked in the simulator. Not yet run on a phone.** Nothing about sound has been verified, because the simulator's audio does not work on this Mac.
+**Status, 2026-11-18: done, on two devices, an iPhone Air and an iPad.** Two devices are accepted for exit criterion 1 for now. See Result at the end.
 
 ## What exists
 
@@ -66,18 +66,19 @@ These are the Stage 1 test. None can be seen in a simulator.
 | New icon on the Home Screen | Yes, 2026-11-14 |
 | Two phones hear each other through headsets | Yes, 2026-11-14, iPhone Air and iPad Air, both ways |
 | iOS plays its own mute and unmute tones in the headset | Yes, 2026-11-14 |
+| Mute and unmute from the lock-screen card, phone locked, with the tone in the headset | Yes, 2026-11-18 at about 20:28, iPhone Air on the OpenComm2, as reported. The phone's log shows the mutes but not where they came from |
 | Headset button toggles mute, on each headset model | Dropped, 2026-11-15. Not possible on iPhone without CallKit, and CallKit was not worth its costs. See Known limits |
 | Headset button latches talk in PTT mode | Dropped with the row above |
-| "You're muted" tone and banner after two seconds of talking while muted | Partly, 2026-11-14. It came once after the app started and not again after unmuting and muting. Fixed in the build installed the same evening, which also speaks the words; not yet retested |
+| "You're muted" tone and banner after two seconds of talking while muted | Yes, 2026-11-18 at 20:38, iPhone Air on the OpenComm2: five mutes, five reminders with the spoken words, 2.1 to 3.5 seconds after the talking began. An hour earlier two of three took 15 seconds; see Known limits for the fault and the fix |
 | OpenComm2 boom mute: the app shows MUTED within two seconds, and the roster says "Muted on headset" | By the phone's log, yes: 4 mutes out of 4 recognised, 2026-11-15, each about 1.5 s after the press. On the phone it "seemed to work reliably". What the roster showed was not reported |
 | OpenComm2 boom unmute: the app goes back to LIVE at the first sound | By the phone's log, yes: 4 out of 4, 2026-11-15 |
 | A live headset in a quiet room is never taken as muted. Read "longest pure silence" in the phone's log | Yes for 90 seconds in a quiet room, 2026-11-15. Not tried on the boat, or with a second headset |
-| Dead-microphone warning stays quiet in a silent room with a live mic | |
+| Dead-microphone warning stays quiet in a silent room with a live mic | No false warning in the 30-minute run of 2026-11-18, on the OpenComm2 or on the iPad's own microphone. Neither room was silent, and the headset never gave pure silence |
 | Audio keeps flowing for 30 minutes, locked, in a pocket | Yes for two phones, 2026-11-18 at 19:02: iPhone Air on the OpenComm2 and the iPad, locked for the whole 30 minutes, lying still in good signal. Not in pockets. See Known limits |
 | Walk out of Wi-Fi range and back: rejoins without touching the phone | Yes, 2026-11-18: iPhone Air, locked, on the OpenComm2, out of range for 3 min 16 s. Not tried for longer, or on the iPad |
 | Headset switched off mid-call: mutes, with a warning | |
 | A phone call comes in: mutes, and comes back as it was | |
-| Four phones, 30 minutes (exit criterion 1) | Two phones passed, 2026-11-18. Four not tried; there are two devices |
+| Four phones, 30 minutes (exit criterion 1) | Two phones passed, 2026-11-18. Four not tried; there are two devices. Two are accepted for now, decided 2026-11-18. Four comes back when there are four phones |
 
 ## Decisions made while building
 
@@ -144,8 +145,17 @@ These are the Stage 1 test. None can be seen in a simulator.
 - **Audio server down.** The control service now checks LiveKit before handing out a token, so the app says the boat's audio server is not answering.
 - **Development keys.** LiveKit runs with its placeholder key, and the control service has no authentication. Fine at home, not for the dock.
 
+- **The "you're muted" reminder is late when speech has pauses, seen 2026-11-18.** The app reminds when iOS reports one unbroken stretch of speech lasting two seconds. iOS ends a stretch at every short pause: counting aloud, the stretches in the iPhone's log last 1.0 to 1.6 seconds with gaps of 0.2 to 4 seconds between them. So the reminder waits for a stretch that happens to run long. In the three tries of 20:28 it came 2, 15 and 15 seconds after the talking began. In a mute a minute earlier, 15 seconds of talk in six stretches brought none. The same pattern is in the log since 2026-11-15: eight stretches while muted, none over 1.5 seconds, and no reminder. **Fixed the same evening.** The app now adds the stretches up and reminds once they come to two seconds. A pause of more than three seconds starts the count again. The iPhone's log replayed through the new rule gives a reminder 2.9, 2.0, 2.9 and 2.8 seconds after the talking began in the four mutes of that evening, and none for the single words of 2026-11-15. **Tried on the iPhone Air at 20:38:** five mutes in a row, counting aloud in each, and the reminder came 3.0, 3.1, 3.1, 2.1 and 3.5 seconds after the talking began. It was heard each time.
+- **A mute shorter than five seconds is logged as a stall, seen 2026-11-18.** At 20:28:19 the iPhone logged "The audio stood still for 4609 ms" as a mute of 4.6 seconds ended. iOS delivers no microphone audio while the app is muted, in every mute: the 30-second microphone counts drop by the length of each one. The stall timer ignores waits of five seconds or more, so only a short mute is counted. It is the instrument, not a fault in the audio.
+
 ## Result
 
-- Exit criterion 1:
-- Exit criterion 3:
-- What Stage 2 needs to know:
+- **Exit criterion 1: passed with two devices, 2026-11-18.** The iPhone Air on the OpenComm2 and the iPad on its own microphone, both locked, for 30 minutes. Two devices are accepted for now. Not as the criterion is written: the phones lay still and were not in pockets, and only one was on a Bluetooth headset. The iPhone was in a pocket for the two 15-minute runs of the same morning.
+- **Exit criterion 3: the lock-screen half passed, 2026-11-18.** Mute and unmute from the lock-screen card, with the tone in the headset. The reminder comes for every new mute, speaks the words, and arrives two to three and a half seconds after the talking begins. The Watch half belongs to Stage 3. The headset button is dropped.
+- **Not tried, and not part of either criterion:** a headset switched off in use, an incoming phone call, and any headset but the OpenComm2.
+- **What Stage 2 needs to know:**
+  - Keep every phone in signal better than about -65 dBm. Below about -70 a phone looks for a stronger access point once a minute and the audio stutters.
+  - Put the Mac on a cable or beside the access point. The rough moments of the 30-minute run hit both phones at once.
+  - Audio waits about 50 to 65 ms in the phone before it is heard. After a rough stretch the player can fall 1.5 seconds behind and take 25 seconds to catch up, and nothing limits that yet.
+  - The VOX gate opens at -42 dB with 400 ms of hangover. Neither figure has been tuned.
+  - iOS delivers no microphone audio while the app is muted.
