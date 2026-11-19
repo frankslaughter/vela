@@ -9,6 +9,12 @@
 
 cd "$(dirname "$0")" || exit 1
 
+# macOS gives a program started from a terminal 256 open files. The control service needs
+# more: each of its connections to the audio server (the roster's ear, the test voices, the
+# recorder) opens some twenty network sockets, and at the start of a recorded test run it ran
+# out ("Too many open files"), which made the test voices leave and rejoin.
+ulimit -n 4096 2>/dev/null
+
 # Shell variables from settings.toml: CONTROL_PORT, LIVEKIT_PORT, LIVEKIT_CONFIG.
 eval "$(.venv/bin/python - <<'PY'
 import shlex
@@ -44,9 +50,17 @@ livekit-server --dev --bind 0.0.0.0 --config-body "$LIVEKIT_CONFIG" > "$LIVEKIT_
 LIVEKIT_PID=$!
 CONTROL_PID=
 
+# A sleeping base station is no base station: keep the Mac from going to sleep by itself
+# while Vela runs. The display may still sleep, and closing the lid still sleeps the Mac.
+AWAKE_PID=
+if command -v caffeinate >/dev/null 2>&1; then
+    caffeinate -i &
+    AWAKE_PID=$!
+fi
+
 stop_all() {
     trap - INT TERM EXIT
-    kill "$LIVEKIT_PID" $CONTROL_PID 2>/dev/null
+    kill "$LIVEKIT_PID" $CONTROL_PID $AWAKE_PID 2>/dev/null
     wait 2>/dev/null
 }
 trap 'stop_all; echo; echo "Vela stopped."; exit 0' INT TERM
@@ -68,6 +82,7 @@ echo "Vela is starting for \"$BOAT_NAME\"."
 echo "  Audio server is up. Its log is server/$LIVEKIT_LOG"
 echo "  Roster: http://$(scutil --get LocalHostName).local:$CONTROL_PORT"
 echo "  Test bench: http://$(scutil --get LocalHostName).local:$CONTROL_PORT/test"
+[ -n "$AWAKE_PID" ] && echo "  The Mac will not go to sleep by itself while this runs."
 echo "  Ctrl-C stops both."
 echo
 

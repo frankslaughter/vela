@@ -135,6 +135,9 @@ function phoneCard(p) {
   if (p.quality) chips.append(chip("Link " + p.quality, p.quality === "poor" || p.quality === "lost" ? "bad" : ""));
   const mic = p.mic_unavailable ? "Microphone off" : p.headset_muted ? "Muted on headset" : p.muted ? "Muted" : "Live";
   chips.append(chip(mic, mic === "Live" ? "good" : ""));
+  if (p.net) chips.append(chip(p.net.max_ms === null ? "Ping lost" : "Ping " + Math.round(p.net.max_ms) + " ms" + (p.net.lost ? ", " + p.net.lost + " lost" : ""),
+                               p.net.lost || p.net.max_ms > 60 ? "bad" : ""));
+  if (p.stall_ms >= 60) chips.append(chip("Audio stalled " + p.stall_ms + " ms", "bad"));
   if (p.silence_suppression === false) chips.append(chip("Silence suppression off"));
   if (p.redundancy === false) chips.append(chip("Redundancy off"));
   if (p.commands_waiting) chips.append(chip(p.commands_waiting + " command waiting"));
@@ -143,7 +146,7 @@ function phoneCard(p) {
   const wrap = el("div", "scroll");
   const table = el("table");
   const headRow = el("tr");
-  for (const h of ["", "Packets", "Sound", "Lost", "Patched over"]) headRow.append(el("th", null, h));
+  for (const h of ["", "Packets", "Sound", "Lost", "Patched over", "Behind"]) headRow.append(el("th", null, h));
   table.append(headRow);
 
   const sendRow = el("tr");
@@ -151,13 +154,13 @@ function phoneCard(p) {
                  el("td", p.sending ? "ok" : "no", p.sending ? "flowing" : "stopped"),
                  el("td", p.talking ? "ok" : "dim", p.talking ? "boat hears talking" : (p.mic_level_db === null || p.mic_level_db === undefined ? "quiet" : "mic " + Math.round(p.mic_level_db) + " dB")),
                  el("td", p.sent_loss > 0.02 ? "no" : "dim", percent(p.sent_loss)),
-                 el("td", "dim", "–"));
+                 el("td", "dim", "–"), el("td", "dim", "–"));
   table.append(sendRow);
 
   if (!p.hearing.length) {
     const row = el("tr");
     const cell = el("td", "dim wrap", "Hearing nobody: no one else is on its channel");
-    cell.colSpan = 5;
+    cell.colSpan = 6;
     row.append(cell);
     table.append(row);
   }
@@ -168,7 +171,8 @@ function phoneCard(p) {
                el("td", h.level_db !== null && h.level_db > -50 ? "ok" : "dim",
                   (h.level_db === null ? "silent" : Math.round(h.level_db) + " dB") + ", heard " + ago(h.heard_ago)),
                el("td", h.loss > 0.02 ? "no" : "dim", percent(h.loss)),
-               el("td", h.concealed !== null && h.concealed > 0.05 ? "no" : "dim", percent(h.concealed)));
+               el("td", h.concealed !== null && h.concealed > 0.05 ? "no" : "dim", percent(h.concealed)),
+               el("td", h.behind_ms > 250 ? "no" : "dim", h.behind_ms === null || h.behind_ms === undefined ? "" : h.behind_ms + " ms"));
     table.append(row);
   }
   wrap.append(table);

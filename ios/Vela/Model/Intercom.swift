@@ -96,6 +96,7 @@ final class Intercom: NSObject, ObservableObject {
     let room = Room()
     private let browser = BoatBrowser()
     private let gate = MicGate()
+    private let engineWatch = EngineWatch()
     private let tones = Tones()
     private let activity = ActivityController()
     /// Also written to Documents/vela-log.txt on the phone; see EventLog.
@@ -123,12 +124,21 @@ final class Intercom: NSObject, ObservableObject {
     /// Recovery normally waits for the app to be on screen, where iOS allows a microphone to
     /// start. Just after an interruption ends, or a microphone reappears, it may try unseen.
     private var mayRecoverUnseenUntil = Date.distantPast
+    /// The microphone is running and the boat is wanted, so the audio engine must not be left
+    /// stopped: iOS will not start it again unseen, and suspends an app whose engine is stopped.
+    private var keepsAudioAlive = false
+    /// When the boat was lost without being asked. The audio is kept alive from then
+    /// for `keepAliveLimit`, and then let go, so a phone carried home does not listen all night.
+    private var lostBoatAt: Date?
+    private static let keepAliveLimit: TimeInterval = 30 * 60
     var testTask: Task<Void, Never>?
     /// For the test bench: how often this phone has joined, and lost the boat without being asked.
     private(set) var joinCount = 0
     private(set) var dropCount = 0
     /// Loudest microphone level since the last test report.
     var testMicPeakDB: Float = -120
+    /// The longest stall of the microphone's audio since the last test report, in seconds.
+    var testAudioStall: Double = 0
     /// Microphone level over the last half minute, for the log.
     private var levelFloorDB: Float = 0
     private var levelPeakDB: Float = -120
@@ -168,6 +178,10 @@ final class Intercom: NSObject, ObservableObject {
             Task { @MainActor in self?.mutedSpeech(event) }
         }
         applyAudioSessionPreference()
+        engineWatch.onStop = { [weak self] in
+            Task { @MainActor in self?.audioEngineStopped() }
+        }
+        AudioManager.shared.set(engineObservers: [engineWatch, AudioManager.shared.audioSession, AudioManager.shared.mixer])
 
         // In PTT the talk button is the only gate. A mute saved from another mode would make it a dead button.
         if mode == .ptt, isMuted {
@@ -281,8 +295,11 @@ final class Intercom: NSObject, ObservableObject {
         talkers = []
         isMicUnavailable = false
         isHeadsetMuted = false
+        keepsAudioAlive = false
+        lostBoatAt = nil
         Task {
             await room.disconnect()
+            try? AudioManager.shared.stopLocalRecording() // in case it was being kept alive for a lost boat
             try? await AudioManager.shared.setRecordingAlwaysPreparedMode(false)
         }
         publishState()
@@ -424,7 +441,8 @@ final class Intercom: NSObject, ObservableObject {
         retryTask?.cancel()
         phase = .joining(boat.name)
         problem = nil
-        log.info("Joining \(boat.name) at \(boat.host)")
+        if restartingAudio { keepsAudioAlive = false } // the engine is meant to stop this time
+        log.info("Joining \(boat.name) at \(boat.host). Audio: \(audioSummary)")
 
         joinTask = Task { [weak self] in
             guard let self else { return }
@@ -439,7 +457,10 @@ final class Intercom: NSObject, ObservableObject {
                 guard generation == joinGeneration else { return }
 
                 if room.connectionState != .disconnected { await room.disconnect() }
-                if restartingAudio { try? await AudioManager.shared.setRecordingAlwaysPreparedMode(false) }
+                if restartingAudio {
+                    try? AudioManager.shared.stopLocalRecording() // it may have been kept alive for a lost boat
+                    try? await AudioManager.shared.setRecordingAlwaysPreparedMode(false)
+                }
                 guard generation == joinGeneration else { return }
 
                 let connect = ConnectOptions(reconnectAttempts: 60, isDscpEnabled: true)
@@ -456,6 +477,8 @@ final class Intercom: NSObject, ObservableObject {
                 let micStarted = await startMicrophone()
                 guard generation == joinGeneration else { return }
                 isMicUnavailable = !micStarted
+                keepsAudioAlive = micStarted
+                lostBoatAt = nil
                 if micStarted {
                     if notice == .micUnavailable { notice = nil }
                 } else {
@@ -531,6 +554,7 @@ final class Intercom: NSObject, ObservableObject {
     private func checkMicrophone() {
         guard phase == .connected else {
             lastGateReport = Date()
+            releaseAudioIfBoatStaysLost()
             return
         }
         let isOnScreen = UIApplication.shared.applicationState == .active
@@ -564,6 +588,42 @@ final class Intercom: NSObject, ObservableObject {
         micRecoveryDelay = min(micRecoveryDelay * 2, 60)
         log.info("Restarting the audio to get the microphone back: \(why)")
         join(boat, channel: channel, restartingAudio: true)
+    }
+
+    /// The audio engine stopped. If that is because the boat went away, start it again at once.
+    ///
+    /// When the last connection to the audio server closes, WebRTC stops recording and playing,
+    /// and the engine with them. iOS will not start a stopped engine for an app that is not on
+    /// screen (the rejoin then fails with error -3001), and it suspends an app whose engine stays
+    /// stopped. So the microphone is started again here, sending nowhere, and the phone in a
+    /// pocket stays awake and ready to rejoin. Keeping recording "always prepared" is not enough:
+    /// that keeps the engine built, not running.
+    private func audioEngineStopped() {
+        guard keepsAudioAlive, wantedBoat != nil else { return }
+        let log = log
+        Task.detached {
+            // The engine also stops for a moment whenever it is rearranged. Leave that alone.
+            guard !AudioManager.shared.isEngineRunning else { return }
+            do {
+                try AudioManager.shared.startLocalRecording()
+                log.info("The audio engine stopped. Started it again to stay ready: engine \(AudioManager.shared.isEngineRunning ? "running" : "stopped")")
+            } catch {
+                log.error("The audio engine stopped and would not start again: \(String(describing: error))")
+            }
+        }
+    }
+
+    /// Half an hour after the boat was lost, stop waiting with the microphone open.
+    /// The app is then suspended like any other, and rejoins when it is next opened.
+    private func releaseAudioIfBoatStaysLost() {
+        guard keepsAudioAlive, let lostBoatAt, Date().timeIntervalSince(lostBoatAt) > Self.keepAliveLimit else { return }
+        keepsAudioAlive = false
+        self.lostBoatAt = nil
+        log.info("The boat has been gone for \(Int(Self.keepAliveLimit / 60)) minutes. Letting the audio go; open Vela to rejoin")
+        Task {
+            try? AudioManager.shared.stopLocalRecording()
+            try? await AudioManager.shared.setRecordingAlwaysPreparedMode(false)
+        }
     }
 
     /// Tells the boat what state the microphone is in, without touching the audio.
@@ -623,6 +683,14 @@ final class Intercom: NSObject, ObservableObject {
         if !isMicUnavailable { micRecoveryDelay = 10 }
         logLevels(report)
         testMicPeakDB = max(testMicPeakDB, report.levelDB)
+        // The microphone and the loudspeaker run off one clock in the phone, so a stall here is
+        // a stall in what is heard as well. Muting stops and starts the audio, so not then.
+        if !isMuted {
+            testAudioStall = max(testAudioStall, report.stallSeconds)
+            if report.stallSeconds >= 0.1 {
+                log.error("The audio stood still for \(Int(report.stallSeconds * 1000)) ms")
+            }
+        }
 
         // A headset muted on its own boom sends next to nothing, and the phone is never told.
         // A second and a half below the faint level on a headset microphone is taken as that
@@ -823,8 +891,9 @@ final class Intercom: NSObject, ObservableObject {
         case .disconnected:
             // Only react when we did not ask for it: joins and leaves change the phase first.
             guard phase.isAboard else { return }
-            log.error("Lost the boat: \(String(describing: self.room.disconnectError))")
+            log.error("Lost the boat: \(String(describing: self.room.disconnectError)). Audio: \(audioSummary)")
             dropCount += 1
+            lostBoatAt = Date()
             phase = .looking
             problem = "Lost \(boatName). Rejoining when it is back in range."
             tones.play(.lost)

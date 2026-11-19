@@ -65,6 +65,9 @@ final class MicGate: NSObject, AudioCustomProcessingDelegate, @unchecked Sendabl
         /// How long every block has been at or below `faintLevelDB`.
         var faintSeconds: Double
         var histogram: Histogram
+        /// The longest wait for a block since the last report, beyond the block's own length.
+        /// Blocks come every 10 ms; a wait of a tenth of a second or more is the audio standing still.
+        var stallSeconds: Double
     }
 
     /// Called about five times a second, on the audio thread.
@@ -79,6 +82,8 @@ final class MicGate: NSObject, AudioCustomProcessingDelegate, @unchecked Sendabl
     private var histogram = Histogram()
     private var windowPeakDB: Float = -120
     private var sinceReport: Double = 0
+    private var lastBlockAt: Double = 0
+    private var worstWait: Double = 0
 
     func update(_ change: (inout Settings) -> Void) {
         lock.lock()
@@ -94,6 +99,7 @@ final class MicGate: NSObject, AudioCustomProcessingDelegate, @unchecked Sendabl
         hangoverLeft = 0
         silentSeconds = 0
         faintSeconds = 0
+        lastBlockAt = 0 // the audio is starting: the wait before the first block is not a stall
         lock.unlock()
     }
 
@@ -116,9 +122,19 @@ final class MicGate: NSObject, AudioCustomProcessingDelegate, @unchecked Sendabl
         let rms = (sumSquares / Float(frames * channels)).squareRoot() / 32768
         let levelDB: Float = rms > 0 ? max(-120, 20 * log10(rms)) : -120
 
+        let now = ProcessInfo.processInfo.systemUptime
+
         lock.lock()
         let duration = Double(frames) / sampleRate
         let current = settings
+
+        // How late is this block? Waits of several seconds are the audio being stopped and
+        // started, not a stall, and are left out.
+        if lastBlockAt > 0 {
+            let wait = now - lastBlockAt - duration
+            if wait < 5 { worstWait = max(worstWait, wait) }
+        }
+        lastBlockAt = now
 
         // One count either way is the smallest step a 16-bit sample can take. Below two is silence.
         // Time spent muted in the app does not count: that silence is ours, not the microphone's.
@@ -154,10 +170,11 @@ final class MicGate: NSObject, AudioCustomProcessingDelegate, @unchecked Sendabl
         var report: Report?
         if sinceReport >= 0.2 {
             report = Report(levelDB: windowPeakDB, isOpen: isOpen, silentSeconds: silentSeconds,
-                            faintSeconds: faintSeconds, histogram: histogram)
+                            faintSeconds: faintSeconds, histogram: histogram, stallSeconds: max(worstWait, 0))
             histogram = Histogram()
             windowPeakDB = -120
             sinceReport = 0
+            worstWait = 0
         }
         let callback = onReport
         lock.unlock()

@@ -8,7 +8,7 @@ The page is at `http://<the Mac's name>.local:7890/test`. `server/start.sh` prin
 
 ## A solo session
 
-1. Start the servers with `server/start.sh` and open the test page.
+1. Start the servers with `server/start.sh` and open the test page. Locked phones that were on the boat rejoin by themselves after a restart (fixed and tried 2026-11-18, with gaps of seven seconds and of three minutes). After half an hour without the boat a phone stops waiting and rejoins when Vela is next opened.
 2. On each phone, open Vela, go to Settings and turn on **Test mode**. The phone appears on the page within a few seconds. The app's header shows "test mode".
 3. Press **Start test voices**. A voice joins each channel and says the time every six seconds.
 4. Turn each spare phone's volume to zero, lock it, and put it in a pocket, a bag or another room. What a phone hears is measured inside the app, so zero volume hides nothing and nothing feeds back.
@@ -23,7 +23,8 @@ For each phone:
 
 - **Chips**: on the boat or not, locked or on screen, headset or phone microphone, battery, link quality, and the mute state.
 - **Sending**: whether its microphone track is putting packets on the wire, and whether the audio server hears it talking. A phone muted in the app still shows "flowing": it goes on sending packets of silence, and the audio server stops passing them on, so the other phones' "Hearing" lines for it show "stopped". A phone with no working microphone shows "stopped" here. The "Lost" figure on this line is the share of the phone's own packets, since it joined, that the audio server says never arrived.
-- **Hearing**: one line for each person or voice on its channel. "Packets" says whether audio is arriving. "Sound" is the level of what arrived and when something audible was last heard. "Lost" is packets that never came. "Patched over" is the share of audio the phone had to invent to cover them.
+- **Hearing**: one line for each person or voice on its channel. "Packets" says whether audio is arriving. "Sound" is the level of what arrived and when something audible was last heard. "Lost" is packets that never came. "Patched over" is the share of audio the phone had to invent to cover them. "Behind" is how long audio waits in the phone before it is heard.
+- **During a run** two more chips appear. "Ping" is the slowest answer from that phone in the last two seconds, and goes red over 60 ms or when one is lost. An answer that comes late counts as slow, not lost. "Audio stalled" appears when the phone's own audio stood still for 60 ms or more.
 - **Buttons**: Mute, Unmute, Next mode and Next channel act on that phone within two seconds. Log opens the phone's own log.
 
 A phone whose Settings have **Silence suppression** or **Redundancy** switched off, under Sending, shows a chip saying so. Both should be on except for the test below.
@@ -41,7 +42,7 @@ A run saves every report for its length and ends with a verdict for each phone. 
 
 Each run leaves a folder under `server/logs/runs/`, named by its start time:
 
-- `report.md`: the verdict and the numbers, readable as it is. "Lost on the way" is the share of each phone's own packets that never reached the audio server; it does not decide pass or fail.
+- `report.md`: the verdict and the numbers, readable as it is. It ends with every moment of lost or patched audio and what the network and the phone's audio were doing then: a slow or lost ping points at the network, an audio stall with a quick ping points at the phone. "Lost on the way" is the share of each phone's own packets that never reached the audio server; it does not decide pass or fail.
 - `summary.json` and `samples.jsonl`: the same, and every report, for a closer look.
 - `recordings/`: one WAV file for each phone's microphone, if recording was on. Stretches with no audio at all are left out, so a file can be shorter than the run.
 
@@ -65,7 +66,10 @@ A recorded run during each minute keeps the microphone audio, to hear whether wo
 ## How it works
 
 - **Reports.** A phone in test mode posts to `/api/report` every two seconds. It sends LiveKit's own receive statistics for each track it is subscribed to, which only ever grow; the server works out the change between reports. The reply carries any commands waiting for that phone.
-- **Test voices.** Ordinary participants run by the control service, named `vela-voice-<channel>`. They speak with the Mac's `say` command. Phones show them as "Test voice 1" and so on.
+- **Test voices.** Ordinary participants run by the control service, named `vela-voice-<channel>`. They speak with the Mac's `say` command. Phones show them as "Test voice 1" and so on. Each voice checks every round that the control service's listener is hearing it, and starts again if it has not been heard for 90 seconds, or if the clock has jumped.
+- **The Mac stays awake.** `server/start.sh` keeps the Mac from going to sleep by itself for as long as it runs. Closing the lid still puts it to sleep.
+- **Timing the network.** During a run the control service pings each phone five times a second, at the address its reports come from. The address is not kept. With silence suppression on, the pings themselves keep a locked phone's radio a little more awake than it would be.
+- **Events.** Test voices starting, stopping and restarting are written to `server/logs/testbench.log`.
 - **Recording.** The control service already sits in every channel as a hidden listener, to know who is talking. During a recorded run it also writes what it receives.
 - **Code.** `server/testbench.py`, `server/test.html`, and `ios/Vela/Model/Intercom+Testing.swift`.
 

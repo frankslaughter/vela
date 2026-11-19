@@ -18,6 +18,7 @@ its Test mode switch on, or someone presses a button on the test page.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import math
 import re
@@ -31,6 +32,10 @@ from livekit import api, rtc
 
 # Test voices are ordinary participants, so phones show them. This marks them as not people.
 VOICE_PREFIX = "vela-voice-"
+# A test voice the listener has not heard for this long starts again. The listener only notes
+# when someone starts or stops talking, so a voice it hears as talking without a break counts
+# as heard; 30 seconds was too short, and restarted a healthy voice in the run of 2026-11-18.
+VOICE_UNHEARD = 90.0
 
 REPORT_INTERVAL = 2.0
 # A phone that has not reported for this long is shown as silent.
@@ -41,11 +46,24 @@ MAX_HEARING_GAP = 10.0
 MIN_CONNECTED = 0.99
 
 COMMANDS = {"mute", "unmute", "mode", "channel"}
+
+# During a run the bench pings each phone this often, to tell a slow network from a slow phone.
+PING_INTERVAL = 0.2
+# A ping answered later than this, or a stall of the phone's audio longer than this, is worth showing.
+SLOW_MS = 60
 SAFE_NAME = re.compile(r"[^A-Za-z0-9-]+")
 
 
 def _db(level: float) -> float | None:
     return round(20 * math.log10(level), 1) if level > 0 else None
+
+
+def _middle_and_most(values: list) -> dict | None:
+    """The typical and the largest of some figures, leaving out the unknown ones."""
+    known = sorted(v for v in values if v is not None)
+    if not known:
+        return None
+    return {"typical": known[len(known) // 2], "most": known[-1]}
 
 
 def _safe(text: str) -> str:
@@ -68,17 +86,28 @@ class TestBench:
         self.recording_dir: Path | None = None
         # Filled in by the control service: who the audio server says is talking.
         self.speaking: dict[str, str] = {}
+        # From the control service's hidden listener: when each person or voice was last heard,
+        # and whether the listener is in its seats. They let a test voice check that it is heard.
+        self.last_spoke: dict[str, float] = {}
+        self.is_listening = lambda: False
+        # address -> the ping running against it and its recent answers, (time, ms or None if lost).
+        self.pings: dict[str, dict] = {}
 
     # ---- Reports from phones ----
 
-    def accept_report(self, report: dict) -> list[dict]:
+    def accept_report(self, report: dict, address: str | None = None) -> list[dict]:
         """Stores a phone's report, works out what changed since the last, and returns its commands."""
         device_id = report["device_id"]
         now = time.time()
         device = self.devices.setdefault(device_id, {"hearing": {}, "sent": {}, "first_seen": now})
         previous = device.get("report") or {}
+        since = device.get("received", now - 2)
         device["report"] = report
         device["received"] = now
+
+        # The network to this phone since its last report, if a run is timing it.
+        device["address"] = address
+        device["net"] = self._network_since(address, since) if self.run is not None else None
 
         # Sending: is the phone's own microphone track putting packets on the wire?
         sent = report.get("sent") or {}
@@ -120,6 +149,13 @@ class TestBench:
             state["packets"] = got
             state["lost"] = lost
             state["concealed_fraction"] = (concealed / samples) if samples and concealed is not None else None
+            # How far behind the phone is playing this person, and how much it stretched the
+            # audio to fall behind or squeezed it to catch up. Samples are at 48 kHz.
+            waited, played = delta("buffer_delay"), delta("buffer_count")
+            state["behind_ms"] = round(waited / played * 1000) if waited is not None and played else None
+            stretched, squeezed = delta("stretched"), delta("squeezed")
+            state["stretched_ms"] = round(stretched / 48) if stretched is not None else None
+            state["squeezed_ms"] = round(squeezed / 48) if squeezed is not None else None
             level = math.sqrt(energy / duration) if energy and duration else 0.0
             state["level_db"] = _db(level)
             if got:
@@ -132,6 +168,74 @@ class TestBench:
         if self.run is not None:
             self._record_sample(device_id, device, now)
         return self.commands.pop(device_id, [])
+
+    # ---- Timing the network to each phone ----
+
+    def _network_since(self, address: str | None, since: float) -> dict | None:
+        """The slowest answer and the number lost since `since`, starting a ping if there is none."""
+        try:
+            ipaddress.ip_address(address or "")
+        except ValueError:
+            return None
+        ping = self.pings.get(address)
+        if ping is None or ping["task"].done():
+            ping = {"answers": [], "task": None}
+            ping["task"] = asyncio.create_task(self._ping(address, ping["answers"]))
+            self.pings[address] = ping
+            return None
+        answers = [ms for t, ms in ping["answers"] if t > since]
+        del ping["answers"][:-200]
+        if not answers:
+            return None
+        times = [ms for ms in answers if ms is not None]
+        return {"max_ms": round(max(times), 1) if times else None, "lost": len(answers) - len(times), "sent": len(answers)}
+
+    async def _ping(self, address: str, answers: list) -> None:
+        """Runs the system's ping against one phone and notes each answer, or its absence."""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "ping", "-i", str(PING_INTERVAL), address,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError as problem:
+            # Seen 2026-11-18: "Too many open files". Say so, and wait before the next report tries again.
+            self._note(f"A ping to a phone could not be started: {problem}")
+            await asyncio.sleep(30)
+            return
+        last = None
+        unanswered: dict[int, list] = {}  # pings given up on, which may still be answered late
+        try:
+            async for raw in process.stdout:
+                line = raw.decode(errors="replace")
+                now = time.time()
+                answer = re.search(r"icmp_seq=(\d+).*time=([0-9.]+)", line)
+                timeout = re.search(r"timeout for icmp_seq (\d+)", line)
+                if answer:
+                    seq, ms = int(answer[1]), float(answer[2])
+                    if seq in unanswered:  # late, not lost: ping gives up after one interval
+                        unanswered.pop(seq)[1] = ms
+                        continue
+                    if last is not None and seq > last + 1:  # a ping that says nothing about the ones it lost
+                        answers.extend([now, None] for _ in range(seq - last - 1))
+                    answers.append([now, ms])
+                    last = max(last or 0, seq)
+                elif timeout:
+                    seq = int(timeout[1])
+                    entry = [now, None]
+                    answers.append(entry)
+                    unanswered[seq] = entry
+                    for old in [s for s in unanswered if s < seq - 50]:
+                        del unanswered[old]
+                    last = max(last or 0, seq)
+        finally:
+            if process.returncode is None:
+                process.kill()
+
+    async def _stop_pings(self) -> None:
+        for ping in self.pings.values():
+            ping["task"].cancel()
+        await asyncio.gather(*(p["task"] for p in self.pings.values()), return_exceptions=True)
+        self.pings = {}
 
     def queue_command(self, device_id: str, action: str) -> None:
         if action not in COMMANDS:
@@ -159,6 +263,16 @@ class TestBench:
             return "No log from this phone yet."
         return "".join(path.read_text().splitlines(keepends=True)[-lines:])
 
+    def _note(self, message: str) -> None:
+        """Says it in the terminal and keeps it in logs/testbench.log, to be read afterwards."""
+        line = f"{datetime.now():%Y-%m-%d %H:%M:%S} {message}"
+        print(line, flush=True)
+        try:
+            with open(self.logs_dir / "testbench.log", "a") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+
     # ---- Test voices ----
 
     @property
@@ -172,23 +286,27 @@ class TestBench:
             asyncio.create_task(self._voice(channel, number))
             for number, channel in enumerate(self.settings["channels"], start=1)
         ]
+        self._note("Test voices started")
 
     async def stop_voices(self) -> None:
         for task in self.voice_tasks:
             task.cancel()
         await asyncio.gather(*self.voice_tasks, return_exceptions=True)
+        if self.voice_tasks:
+            self._note("Test voices stopped")
         self.voice_tasks = []
 
     async def _voice(self, channel: str, number: int) -> None:
         """Joins a channel and says the time every six seconds, with silence in between."""
         url = f"ws://127.0.0.1:{self.settings['livekit_port']}"
         rate, block = 48000, 480  # 10 ms
+        identity = f"{VOICE_PREFIX}{channel}"
         while True:
             room = rtc.Room()
             try:
                 token = (
                     api.AccessToken(self.settings["api_key"], self.settings["api_secret"])
-                    .with_identity(f"{VOICE_PREFIX}{channel}")
+                    .with_identity(identity)
                     .with_name(f"Test voice {number}")
                     .with_grants(api.VideoGrants(room_join=True, room=channel))
                     .to_jwt()
@@ -200,22 +318,47 @@ class TestBench:
                     track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
                 )
                 silence = bytes(block * 2)
-                while True:
-                    clock = datetime.now()
-                    words = f"Voice {number}. {clock.hour % 12 or 12} {clock.minute:02d} and {clock.second} seconds."
-                    speech = await self._speak(words, rate)
-                    cycle = max(6.0, len(speech) / 2 / rate + 2.0)
+                joined = time.time()
+
+                async def play(speech: bytes, cycle: float) -> None:
                     for start in range(0, int(cycle * rate) * 2, block * 2):
                         chunk = speech[start : start + block * 2]
                         if len(chunk) < block * 2:
                             chunk = chunk + silence[: block * 2 - len(chunk)]
                         await source.capture_frame(rtc.AudioFrame(chunk, rate, 1, block))
+
+                while True:
+                    began = time.time()
+                    clock = datetime.now()
+                    words = f"Voice {number}. {clock.hour % 12 or 12} {clock.minute:02d} and {clock.second} seconds."
+                    speech = await asyncio.wait_for(self._speak(words, rate), 15)
+                    cycle = max(6.0, len(speech) / 2 / rate + 2.0)
+                    await asyncio.wait_for(play(speech, cycle), cycle + 15)
+
+                    # A voice can stay on the boat and send nothing: seen after the Mac slept, when
+                    # the voices were silent until stopped and started by hand. So each round checks
+                    # that the clock did not jump, that the room is still there, and that the
+                    # control service's listener is hearing this voice. Any doubt, and it starts again.
+                    now = time.time()
+                    if now - began > cycle + 15:
+                        raise RuntimeError("the clock jumped: the Mac slept")
+                    if not room.isconnected():
+                        raise RuntimeError("the room is gone")
+                    heard = max(joined, self.last_spoke.get(identity, 0))
+                    talking = identity in self.speaking
+                    if self.is_listening() and not talking and now - heard > VOICE_UNHEARD:
+                        raise RuntimeError("the listener does not hear this voice")
             except asyncio.CancelledError:
                 await room.disconnect()
                 raise
-            except Exception:
-                await room.disconnect()
-                await asyncio.sleep(2)  # the audio server restarted; come back
+            except Exception as problem:
+                # The audio server restarted, the Mac slept, or the voice went quiet: come back.
+                self._note(f"Test voice {number} is starting again: {str(problem) or type(problem).__name__}")
+                try:
+                    await asyncio.wait_for(room.disconnect(), 5)
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
 
     @staticmethod
     async def _speak(words: str, rate: int) -> bytes:
@@ -325,6 +468,7 @@ class TestBench:
             self.run_task.cancel()
         if run["recording"]:
             await self.stop_recording()
+        await self._stop_pings()
         ended = time.time() if not finished else run["ends"]
         summary = self._summarise(run, ended)
         folder = Path(run["folder"])
@@ -357,6 +501,8 @@ class TestBench:
                 "sent_lost": device["sent"]["lost"],
                 "silence_suppression": report.get("silence_suppression"),
                 "redundancy": report.get("redundancy"),
+                "stall_ms": report.get("audio_stall_ms"),
+                "net": device.get("net"),
                 "hearing": {
                     identity: {
                         "voice": h["voice"],
@@ -365,6 +511,9 @@ class TestBench:
                         "lost": h["lost"],
                         "concealed": h["concealed_fraction"],
                         "level_db": h["level_db"],
+                        "behind_ms": h.get("behind_ms"),
+                        "stretched_ms": h.get("stretched_ms"),
+                        "squeezed_ms": h.get("squeezed_ms"),
                     }
                     for identity, h in device["hearing"].items()
                 },
@@ -400,6 +549,7 @@ class TestBench:
                     "flowing": round(sum(1 for _, h in seen if h["flowing"]) / len(seen), 4),
                     "loss": round(lost / (got + lost), 4) if got + lost else None,
                     "concealed": round(sum(concealed) / len(concealed), 4) if concealed else None,
+                    "behind_ms": _middle_and_most([h.get("behind_ms") for _, h in seen]),
                 }
 
             problems = []
@@ -429,6 +579,12 @@ class TestBench:
                     "locked": fraction([s for s in samples if s["locked"]]),
                     "in_background": fraction([s for s in samples if s["app"] != "active"]),
                     "sending": fraction([s for s in samples if s["sending"]]),
+                    "network": self._network_summary(samples),
+                    "stalls": {
+                        "worst_ms": max((s.get("stall_ms") or 0 for s in samples), default=0),
+                        "count": sum(1 for s in samples if (s.get("stall_ms") or 0) >= SLOW_MS),
+                        "known": any(s.get("stall_ms") is not None for s in samples),
+                    },
                     "sent_loss": (
                         sum(s.get("sent_lost") or 0 for s in samples) / sum(s.get("sent_packets") or 0 for s in samples)
                         if sum(s.get("sent_packets") or 0 for s in samples)
@@ -455,7 +611,50 @@ class TestBench:
             "folder": run["folder"],
             "passed": bool(phones) and all(p["passed"] for p in phones),
             "phones": sorted(phones, key=lambda p: (p["name"] or "").lower()),
+            "moments": self._moments(run),
         }
+
+    @staticmethod
+    def _network_summary(samples: list[dict]) -> dict | None:
+        timed = [s["net"] for s in samples if s.get("net")]
+        if not timed:
+            return None
+        answered = [n["max_ms"] for n in timed if n["max_ms"] is not None]
+        return {
+            "worst_ms": max(answered) if answered else None,
+            "slow": sum(1 for n in timed if n["lost"] or (n["max_ms"] or 0) > SLOW_MS),
+            "lost": sum(n["lost"] for n in timed),
+            "sent": sum(n["sent"] for n in timed),
+            "samples": len(timed),
+        }
+
+    @staticmethod
+    def _moments(run: dict) -> list[dict]:
+        """Every report in which a phone lost audio or had to patch it, with what else was true then."""
+        names = {d: s[-1]["name"] for d, s in run["samples"].items() if s}
+        found = []
+        for device_id, samples in run["samples"].items():
+            for s in samples:
+                for identity, h in s["hearing"].items():
+                    if not ((h["concealed"] or 0) > 0.02 or (h["lost"] or 0) > 0):
+                        continue
+                    net = s.get("net") or {}
+                    found.append(
+                        {
+                            "t": s["t"],
+                            "phone": s["name"],
+                            "from": "a test voice" if h["voice"] else names.get(identity, identity[:8]),
+                            "patched": h["concealed"],
+                            "lost": h["lost"],
+                            "behind_ms": h.get("behind_ms"),
+                            "stretched_ms": h.get("stretched_ms"),
+                            "net_ms": net.get("max_ms"),
+                            "net_lost": net.get("lost"),
+                            "stall_ms": s.get("stall_ms"),
+                            "locked": s.get("locked"),
+                        }
+                    )
+        return sorted(found, key=lambda m: m["t"])[:300]
 
     @staticmethod
     def _report_text(summary: dict) -> str:
@@ -485,15 +684,62 @@ class TestBench:
                 f"| {p['connected']:.1%} | {p['locked']:.0%} | {p['sending']:.0%} | {sent_loss} "
                 f"| {p['longest_report_gap']:.0f} s | {p['drops'] if p['drops'] is not None else 'unknown'} | {battery} |"
             )
-        lines += ["", "## What each phone heard", "", "| Phone | From | Packets flowing | Longest gap | Lost | Patched over |", "|---|---|---|---|---|---|"]
+        lines += [
+            "",
+            "## What each phone heard",
+            "",
+            "| Phone | From | Packets flowing | Longest gap | Lost | Patched over | Playing behind, typical and most |",
+            "|---|---|---|---|---|---|---|",
+        ]
         names = {p["device_id"]: p["name"] for p in summary["phones"]}
         for p in summary["phones"]:
             for identity, s in sorted(p["sources"].items()):
                 source = "a test voice" if s["voice"] else names.get(identity, identity[:8])
                 loss = f"{s['loss']:.2%}" if s["loss"] is not None else "unknown"
                 patched = f"{s['concealed']:.2%}" if s["concealed"] is not None else "unknown"
+                behind = s.get("behind_ms")
+                behind = f"{behind['typical']} ms, {behind['most']} ms" if behind else "unknown"
                 lines.append(
-                    f"| {p['name']} | {source} | {s['flowing']:.1%} | {s['longest_gap']:.0f} s | {loss} | {patched} |"
+                    f"| {p['name']} | {source} | {s['flowing']:.1%} | {s['longest_gap']:.0f} s | {loss} | {patched} | {behind} |"
+                )
+
+        lines += [
+            "",
+            "## The network and the audio on each phone",
+            "",
+            "| Phone | Pings sent | Pings lost | Slowest answer | Reports with a slow or lost ping | Longest audio stall | Reports with a stall |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for p in summary["phones"]:
+            net, stalls = p.get("network"), p.get("stalls") or {}
+            worst = f"{net['worst_ms']:.0f} ms" if net and net["worst_ms"] is not None else "unknown"
+            lines.append(
+                f"| {p['name']} | {net['sent'] if net else 'not timed'} | {net['lost'] if net else ''} | {worst if net else ''} "
+                f"| {str(net['slow']) + ' of ' + str(net['samples']) if net else ''} "
+                f"| {str(stalls['worst_ms']) + ' ms' if stalls.get('known') else 'unknown'} "
+                f"| {stalls['count'] if stalls.get('known') else ''} |"
+            )
+
+        moments = summary.get("moments") or []
+        lines += ["", "## Moments of lost or patched audio", ""]
+        if not moments:
+            lines.append("None.")
+        else:
+            lines += [
+                "| Time | To go | Phone | From | Patched | Lost | Playing behind | Slowest ping | Pings lost | Audio stall |",
+                "|---|---|---|---|---|---|---|---|---|---|",
+            ]
+            planned = summary["planned_minutes"] * 60
+
+            def known(value, unit=""):
+                return "" if value is None else f"{value:g}{unit}"
+
+            for m in moments:
+                left = max(planned - (m["t"] - summary["started"]), 0)
+                lines.append(
+                    f"| {datetime.fromtimestamp(m['t']):%H:%M:%S} | {int(left // 60)}:{int(left % 60):02d} | {m['phone']} | {m['from']} "
+                    f"| {(m['patched'] or 0):.0%} | {known(m['lost'])} | {known(m['behind_ms'], ' ms')} "
+                    f"| {known(m['net_ms'], ' ms')} | {known(m['net_lost'])} | {known(m['stall_ms'], ' ms')} |"
                 )
         lines += [
             "",
@@ -502,6 +748,9 @@ class TestBench:
             f" {MAX_HEARING_GAP:.0f} s without packets from a test voice.",
             "\"Patched over\" is the share of audio the phone had to invent to cover missing packets.",
             "\"Lost on the way\" is the share of the phone's own packets that the audio server says never arrived. It does not decide pass or fail.",
+            "\"Playing behind\" is how long audio waits in the phone before it is heard.",
+            f"During a run the bench pings each phone every {PING_INTERVAL:g} s. \"Audio stall\" is the longest the phone's own audio stood still.",
+            "A moment with a slow or lost ping points at the network; one with an audio stall and a quick ping points at the phone.",
             "",
         ]
         return "\n".join(lines)
@@ -538,6 +787,7 @@ class TestBench:
                         "packets_ago": round(now - h["packets_at"], 1) if "packets_at" in h else None,
                         "loss": (h["lost"] / (h["packets"] + h["lost"])) if h["packets"] and h["lost"] else 0.0,
                         "concealed": h["concealed_fraction"],
+                        "behind_ms": h.get("behind_ms"),
                     }
                 )
             phones.append(
@@ -563,6 +813,8 @@ class TestBench:
                     "version": report.get("version"),
                     "sending": device["sent"].get("flowing", False),
                     "sent_loss": device["sent"].get("loss"),
+                    "stall_ms": report.get("audio_stall_ms"),
+                    "net": device.get("net"),
                     "silence_suppression": report.get("silence_suppression"),
                     "redundancy": report.get("redundancy"),
                     "talking": device_id in self.speaking,

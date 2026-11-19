@@ -195,6 +195,8 @@ class ActivityMonitor:
 
 monitor = ActivityMonitor()
 bench.speaking = monitor.speaking  # the same dictionary: the bench reads who is talking
+bench.last_spoke = monitor.last_spoke  # and when each was last heard, so a test voice can check it is
+bench.is_listening = lambda: monitor.snapshot()["listening"]
 
 # device_id -> what we last knew about that phone. In memory only for now.
 devices: dict[str, dict] = {}
@@ -375,10 +377,12 @@ def checked_device_id(device_id: str) -> str:
 
 
 @app.post("/api/report")
-async def report(body: dict) -> dict:
+async def report(body: dict, request: Request) -> dict:
     """A phone in test mode says what it is sending and hearing. The reply carries its commands."""
     checked_device_id(str(body.get("device_id", "")))
-    return {"commands": bench.accept_report(body)}
+    # Where the report came from is where the bench pings during a run. Nothing is stored.
+    address = request.client.host if request.client else None
+    return {"commands": bench.accept_report(body, address)}
 
 
 @app.post("/api/log")

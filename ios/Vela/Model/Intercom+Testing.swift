@@ -80,11 +80,13 @@ extension Intercom {
             "route_out": session.currentRoute.outputs.map(\.portType.rawValue).joined(separator: "+"),
             "quality": qualityName,
             "mic_level_db": Double(testMicPeakDB),
+            "audio_stall_ms": Int(testAudioStall * 1000),
             "joins": joinCount,
             "drops": dropCount,
         ]
         if device.batteryLevel >= 0 { report["battery"] = Double(device.batteryLevel) }
         testMicPeakDB = -120
+        testAudioStall = 0
 
         // What this phone's own microphone track has put on the wire, and how much of it the
         // audio server says never arrived. Both counts start again with each join.
@@ -109,6 +111,15 @@ extension Intercom {
                 if let value = stats.totalAudioEnergy { entry["energy"] = value }
                 if let value = stats.totalSamplesDuration { entry["duration"] = value }
                 if let value = stats.jitter { entry["jitter"] = value }
+                // How long audio waits in the player before it is heard: a total, and how many
+                // samples it is the total for. The bench divides one by the other.
+                if let value = stats.jitterBufferDelay { entry["buffer_delay"] = value }
+                if let value = stats.jitterBufferEmittedCount { entry["buffer_count"] = value }
+                // Samples the player added to fall behind, and dropped to catch up.
+                if let value = stats.insertedSamplesForDeceleration { entry["stretched"] = value }
+                if let value = stats.removedSamplesForAcceleration { entry["squeezed"] = value }
+                // Packets that arrived too late to be played.
+                if let value = stats.packetsDiscarded { entry["discarded"] = value }
             }
             hearing.append(entry)
         }
