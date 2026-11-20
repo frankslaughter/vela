@@ -85,6 +85,7 @@ final class Intercom: NSObject, ObservableObject {
     /// How the microphone's audio is sent. Both are on for normal use; the switches are for finding lost packets.
     @Published private(set) var suppressesSilence = Preferences.suppressesSilence
     @Published private(set) var sendsRedundancy = Preferences.sendsRedundancy
+    @Published private(set) var marksVoice = Preferences.marksVoice
     /// The boat to be on. Set by choosing one, cleared by leaving.
     @Published private(set) var wantedBoat = Preferences.boatName
 
@@ -139,6 +140,9 @@ final class Intercom: NSObject, ObservableObject {
     var testMicPeakDB: Float = -120
     /// The longest stall of the microphone's audio since the last test report, in seconds.
     var testAudioStall: Double = 0
+    /// For the path line in the log: what each network path had sent and dropped at the last line, and when that was.
+    var testPathCounts: [String: (sent: UInt64, dropped: UInt64)] = [:]
+    var testPathLoggedAt = Date.distantPast
     /// Microphone level over the last half minute, for the log.
     private var levelFloorDB: Float = 0
     private var levelPeakDB: Float = -120
@@ -380,6 +384,13 @@ final class Intercom: NSObject, ObservableObject {
         if phase.isAboard, let boat = currentBoat { join(boat, channel: channel) }
     }
 
+    func setMarksVoice(_ on: Bool) {
+        guard on != marksVoice else { return }
+        marksVoice = on
+        Preferences.marksVoice = on
+        if phase.isAboard, let boat = currentBoat { join(boat, channel: channel) }
+    }
+
     func setUsesSpeakerWithoutHeadset(_ on: Bool) {
         usesSpeakerWithoutHeadset = on
         Preferences.usesSpeakerWithoutHeadset = on
@@ -463,7 +474,7 @@ final class Intercom: NSObject, ObservableObject {
                 }
                 guard generation == joinGeneration else { return }
 
-                let connect = ConnectOptions(reconnectAttempts: 60, isDscpEnabled: true)
+                let connect = ConnectOptions(reconnectAttempts: 60, isDscpEnabled: marksVoice)
                 let options = RoomOptions(
                     defaultAudioCaptureOptions: AudioCaptureOptions(echoCancellation: true, autoGainControl: true, noiseSuppression: true),
                     defaultAudioPublishOptions: micPublishOptions,
@@ -499,7 +510,7 @@ final class Intercom: NSObject, ObservableObject {
                 publishMicState()
                 log.info("Joined \(ticket.boat) on \(ticket.channel), muted \(self.isMuted), microphone \(micStarted)")
                 log.info("Audio after joining: \(audioSummary)")
-                log.info("Sending with silence suppression \(suppressesSilence ? "on" : "off"), redundancy \(sendsRedundancy ? "on" : "off")")
+                log.info("Sending with silence suppression \(suppressesSilence ? "on" : "off"), redundancy \(sendsRedundancy ? "on" : "off"), voice marking \(marksVoice ? "on" : "off")")
                 tones.play(.joined)
                 stateChanged()
             } catch {

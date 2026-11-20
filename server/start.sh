@@ -21,15 +21,25 @@ import shlex
 import control
 
 s = control.SETTINGS
+# A UDP port for each connection, from a range. The single shared port loses audio on this Mac
+# as soon as two phones use it: see control.py.
+if s["livekit_udp_port_range"]:
+    first, last = s["livekit_udp_port_range"]
+    udp = f"  port_range_start: {first}\n  port_range_end: {last}\n"
+    udp_note = f"Each connection gets its own UDP port, from {first} to {last}."
+else:
+    udp = f"  udp_port: {s['livekit_udp_port']}\n"
+    udp_note = f"Every phone shares UDP port {s['livekit_udp_port']}. This loses audio when two phones are on."
 config = (
     f"port: {s['livekit_port']}\n"
-    f"rtc:\n  tcp_port: {s['livekit_tcp_port']}\n  udp_port: {s['livekit_udp_port']}\n"
+    f"rtc:\n  tcp_port: {s['livekit_tcp_port']}\n{udp}"
     f"keys:\n  {s['api_key']}: {s['api_secret']}\n"
 )
 print(f"CONTROL_PORT={s['control_port']}")
 print(f"LIVEKIT_PORT={s['livekit_port']}")
 print(f"LIVEKIT_CONFIG={shlex.quote(config)}")
 print(f"BOAT_NAME={shlex.quote(s['boat_name'])}")
+print(f"UDP_NOTE={shlex.quote(udp_note)}")
 PY
 )" || exit 1
 [ -n "$CONTROL_PORT" ] || { echo "Could not read settings.toml."; exit 1; }
@@ -80,6 +90,7 @@ done
 
 echo "Vela is starting for \"$BOAT_NAME\"."
 echo "  Audio server is up. Its log is server/$LIVEKIT_LOG"
+echo "  $UDP_NOTE"
 echo "  Roster: http://$(scutil --get LocalHostName).local:$CONTROL_PORT"
 echo "  Test bench: http://$(scutil --get LocalHostName).local:$CONTROL_PORT/test"
 [ -n "$AWAKE_PID" ] && echo "  The Mac will not go to sleep by itself while this runs."

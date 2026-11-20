@@ -13,3 +13,7 @@ port = 7890                       # the control service; phones find it over Bon
 port       = 7880
 api_key    = "devkey"             # LiveKit's development placeholders; replace before the dock
 api_secret = "secret"
+# Each connection gets UDP ports of its own from 20000 to 21999. To move the range:
+#   rtc_udp_port_range = [20000, 21999]
+# One port shared by every phone loses audio on a Mac. Only for comparing:
+#   rtc_udp_port = 7882

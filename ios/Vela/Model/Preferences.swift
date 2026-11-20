@@ -85,4 +85,10 @@ enum Preferences {
         get { !store.bool(forKey: "noRedundancy") }
         set { store.set(!newValue, forKey: "noRedundancy") }
     }
+
+    /// Voice marking (DSCP): packets are marked as voice, which puts them in the Wi-Fi's voice queue. On unless switched off for a test.
+    static var marksVoice: Bool {
+        get { !store.bool(forKey: "noVoiceMarking") }
+        set { store.set(!newValue, forKey: "noVoiceMarking") }
+    }
 }

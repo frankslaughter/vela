@@ -49,10 +49,14 @@ struct SettingsView: View {
                         get: { intercom.sendsRedundancy },
                         set: { intercom.setSendsRedundancy($0) }
                     ))
+                    Toggle("Voice marking", isOn: Binding(
+                        get: { intercom.marksVoice },
+                        set: { intercom.setMarksVoice($0) }
+                    ))
                 } header: {
                     Text("Sending")
                 } footer: {
-                    Text("Leave both on. They are here to find out why packets go missing. Silence suppression sends almost nothing while you are quiet. Redundancy repeats each packet in the next one. Changing either rejoins the boat.")
+                    Text("Leave all three on. They are here to find out why packets go missing. Silence suppression sends almost nothing while you are quiet. Redundancy repeats each packet in the next one. Voice marking asks the Wi-Fi to treat the packets as a phone call. Changing any of them rejoins the boat.")
                 }
 
                 Section {

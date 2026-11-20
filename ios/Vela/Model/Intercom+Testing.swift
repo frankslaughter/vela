@@ -55,6 +55,31 @@ extension Intercom {
         }
     }
 
+    /// Every ten seconds, one log line on the network paths the microphone's packets can take: how many
+    /// went out on each, and how many the phone itself threw away before they reached the network.
+    /// A count on more than one path, or any thrown away, means packets are being lost inside the phone.
+    private func logSendingPaths(_ statistics: TrackStatistics?) {
+        guard let statistics, Date().timeIntervalSince(testPathLoggedAt) >= 10 else { return }
+        testPathLoggedAt = Date()
+        let chosen = statistics.transportStats?.selectedCandidatePairId
+        var parts: [String] = []
+        var counts: [String: (sent: UInt64, dropped: UInt64)] = [:]
+        for pair in statistics.iceCandidatePair {
+            let sent = pair.packetsSent ?? 0
+            let dropped = UInt64(pair.packetsDiscardedOnSend ?? 0)
+            counts[pair.id] = (sent, dropped)
+            let before = testPathCounts[pair.id] ?? (0, 0)
+            let newlySent = sent >= before.sent ? sent - before.sent : sent
+            let newlyDropped = dropped >= before.dropped ? dropped - before.dropped : dropped
+            guard pair.id == chosen || newlySent > 0 || newlyDropped > 0 else { continue }
+            let trip = pair.currentRoundTripTime.map { "\(Int($0 * 1000)) ms" } ?? "unknown"
+            parts.append("\(pair.id == chosen ? "chosen " : "")\(pair.id) \(pair.state?.rawValue ?? "?"): sent \(newlySent), thrown away \(newlyDropped), round trip \(trip), checks \(pair.requestsSent ?? 0) sent \(pair.responsesReceived ?? 0) answered")
+        }
+        testPathCounts = counts
+        let changes = statistics.transportStats?.selectedCandidatePairChanges.map(String.init) ?? "unknown"
+        log.info("Sending paths over 10 s, \(statistics.iceCandidatePair.count) known, changes of path so far \(changes). \(parts.isEmpty ? "None in use" : parts.joined(separator: "; "))")
+    }
+
     private func testReport() -> [String: Any] {
         let session = AVAudioSession.sharedInstance()
         let app = UIApplication.shared
@@ -72,6 +97,7 @@ extension Intercom {
             "mic_unavailable": isMicUnavailable,
             "silence_suppression": suppressesSilence,
             "redundancy": sendsRedundancy,
+            "voice_marking": marksVoice,
             "app_state": app.applicationState == .active ? "active" : (app.applicationState == .background ? "background" : "inactive"),
             // True a few seconds after the phone locks, on a phone with a passcode.
             "locked": !app.isProtectedDataAvailable,
@@ -96,6 +122,7 @@ extension Intercom {
             if let lost = statistics?.remoteInboundRtpStream.first?.packetsLost { sent["lost"] = lost }
             report["sent"] = sent
         }
+        logSendingPaths(statistics)
 
         // What has arrived from each person this phone is listening to. The counts only ever grow;
         // the test bench works out the change between reports.

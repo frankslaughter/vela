@@ -22,3 +22,7 @@ __pycache__/
 
 # Server logs
 server/logs/
+
+# Stage 2: the generated boat noise (make it with stage2/make_noise.py) and test recordings of voices
+stage2/boat-noise.wav
+latency-*.m4a

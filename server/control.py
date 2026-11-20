@@ -36,10 +36,33 @@ DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 MONITOR_IDENTITY = "vela-monitor"
 
 
+# Each connection to the audio server gets a UDP port of its own from this range. With one port
+# shared by every phone, the Mac discarded about a fifth of one phone's audio whenever the port
+# had just been used to talk to another: found by a capture on 2026-11-19, docs/stage-2-log.md.
+# A connection holds about twenty ports, one for each of the Mac's addresses, and a phone makes
+# two connections. Counted on 2026-11-19: 84 ports for the control service's four seats. So six
+# phones and the seats need about 350, and the range leaves plenty of room.
+DEFAULT_UDP_PORT_RANGE = (20000, 21999)
+
+
+def udp_ports(livekit: dict) -> tuple[int | None, tuple[int, int] | None]:
+    """The single UDP port, or the range of them. A range unless settings.toml asks for the single port."""
+    wanted = livekit.get("rtc_udp_port_range")
+    if wanted is None:
+        if "rtc_udp_port" in livekit:
+            return int(livekit["rtc_udp_port"]), None
+        return None, DEFAULT_UDP_PORT_RANGE
+    if not (isinstance(wanted, list) and len(wanted) == 2 and all(isinstance(p, int) for p in wanted)
+            and 1024 <= wanted[0] < wanted[1] <= 65535):
+        raise SystemExit("settings.toml: rtc_udp_port_range must be two port numbers, the lower first")
+    return None, (wanted[0], wanted[1])
+
+
 def load_settings() -> dict:
     with open(SETTINGS_PATH, "rb") as f:
         s = tomllib.load(f)
     channels = s.get("channels") or ["all"]
+    udp_port, udp_port_range = udp_ports(s.get("livekit", {}))
     return {
         "boat_name": s.get("boat_name", "Unnamed Boat"),
         "assistant_name": s.get("assistant_name", "Vela"),
@@ -48,7 +71,8 @@ def load_settings() -> dict:
         "livekit_port": s.get("livekit", {}).get("port", 7880),
         # Media ports. The defaults are LiveKit's own; they only need naming to move them.
         "livekit_tcp_port": s.get("livekit", {}).get("rtc_tcp_port", 7881),
-        "livekit_udp_port": s.get("livekit", {}).get("rtc_udp_port", 7882),
+        "livekit_udp_port": udp_port,
+        "livekit_udp_port_range": udp_port_range,
         "api_key": s.get("livekit", {}).get("api_key", "devkey"),
         "api_secret": s.get("livekit", {}).get("api_secret", "secret"),
     }
