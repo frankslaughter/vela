@@ -27,7 +27,7 @@ For each phone:
 - **During a run** two more chips appear. "Ping" is the slowest answer from that phone in the last two seconds, and goes red over 60 ms or when one is lost. An answer that comes late counts as slow, not lost. "Audio stalled" appears when the phone's own audio stood still for 60 ms or more.
 - **Buttons**: Mute, Unmute, Next mode and Next channel act on that phone within two seconds. Log opens the phone's own log.
 
-A phone whose Settings have **Silence suppression** or **Redundancy** switched off, under Sending, shows a chip saying so. Both should be on except for the test below.
+A phone whose Settings have **Silence suppression** switched on, or **Redundancy** switched off, under Sending, shows a chip saying so. Silence suppression is off as shipped since 2026-11-19 and Redundancy is on; `docs/stage-2-log.md` has the reason.
 
 A phone that has not reported for seven seconds is shown as not reporting, with no numbers, because old numbers would look like good news. That is what a phone looks like when iOS has suspended the app, which is the thing the pocket test is looking for.
 
@@ -51,6 +51,8 @@ Phone logs arrive every ten seconds while Test mode is on, in `server/logs/phone
 ## Finding the lost packets
 
 On 2026-11-16 about half the iPad's packets never reached the audio server, mostly in quiet stretches; see `docs/stage-1-log.md`. To find out whether silence suppression or redundancy is behind it:
+
+These steps are as they were done, when silence suppression was on as shipped. On 2026-11-19 a capture showed packets being lost inside the Mac whenever two phones shared the audio server's one UDP port, which may be what this was; see `docs/stage-2-log.md`.
 
 Use the iPad on its own microphone in a quiet room, which is where the loss was seen. The iPhone Air on a headset lost nothing on 2026-11-17.
 

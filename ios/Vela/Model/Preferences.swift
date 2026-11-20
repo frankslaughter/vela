@@ -74,10 +74,16 @@ enum Preferences {
         set { store.set(newValue, forKey: "isTestMode") }
     }
 
-    /// Silence suppression (DTX): send almost nothing while the microphone is quiet. On unless switched off for a test.
+    /// Silence suppression (DTX): send almost nothing while the microphone is quiet. Off unless switched on.
+    /// With it on, the first words after a silence reach the listener about 50 ms later, because
+    /// the listener's player waits longer when packets come only five times a second: 290 ms
+    /// against 240 ms with Bluetooth at both ends, measured 2026-11-19 (docs/stage-2-log.md).
+    /// A locked phone that sends without a break also keeps its radio awake (docs/stage-1-log.md).
+    /// Until 2026-11-19 it was on unless switched off, under the key "noSilenceSuppression",
+    /// which is no longer read, so every phone starts from off.
     static var suppressesSilence: Bool {
-        get { !store.bool(forKey: "noSilenceSuppression") }
-        set { store.set(!newValue, forKey: "noSilenceSuppression") }
+        get { store.bool(forKey: "silenceSuppression") }
+        set { store.set(newValue, forKey: "silenceSuppression") }
     }
 
     /// Redundancy (RED): each packet repeats the one before, to cover a lost packet. On unless switched off for a test.

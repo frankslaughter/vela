@@ -2,7 +2,13 @@
 
 Started 2026-11-19. Done when exit criteria 2 and 4 pass: the delay from mouth to ear measured, under 250 ms on Bluetooth and under 150 ms wired, and Open, VOX and PTT holding up against boat noise.
 
-**Status, 2026-11-19: the delay is measured on each Bluetooth side separately, not yet with Bluetooth at both ends. The estimate for both ends is about 255 ms, at the limit. The noise test on the headset shows the three modes doing the right thing, but about a quarter of the iPhone's audio is going missing on the way, so clipped word beginnings cannot be judged yet.**
+**Status at the end of 2026-11-19:**
+
+- **Noise, criterion 4: holding up.** Open, VOX and PTT do the right thing on the headset in boat noise, and VOX does not clip word beginnings. The gate's level is to be set against the real cockpit's noise on the boat.
+- **Delay, criterion 2: inside the Bluetooth limit, with silence suppression off.** With Bluetooth headsets at both ends it measures 240 ms with silence suppression off and 290 ms with it on, against 250 ms. The app now ships with it off. A wired earpiece has not been measured; without Bluetooth the delay is 188 ms against 150 ms.
+- **Audio lost on the way: fixed.** It was the audio server's single shared UDP port, found with a capture. Each connection now has a port of its own.
+
+The sections below are in the order things happened, including two explanations that turned out wrong.
 
 ## How the delay is measured
 
@@ -226,8 +232,74 @@ A packet from one phone is very likely to be discarded when the shared port has 
 
 The build on both devices still has the line that hides the seat. It does nothing now that the seat is gone, and the next build installed will not have it.
 
+## VOX run for clipped word beginnings, 2026-11-19 at 20:56
+
+Run `2026-11-19-205610`, two minutes, recorded. The iPhone on the OpenComm2 in VOX, boat noise playing, the iPad muted. Ten lines were read after 37 seconds of silence, each starting with a different kind of sound, with a few seconds between them so that each began from a closed gate.
+
+| Measure | Result |
+|---|---|
+| iPhone's packets lost on the way | 0 of 1,614 |
+| Lines in the recording | 10 of 10, peaks of -10 to -16 dB |
+| Time from the gate opening to full voice | 15 to 50 ms, rising from the floor each time |
+| Gate held open after each line | 0.5 to 1.2 seconds |
+| Gate opened on noise alone | once in 37 seconds, for 0.4 seconds |
+
+- **Nothing was lost on the way**, so for the first time a VOX recording has no holes and can be judged.
+- **Voiced beginnings are whole.** Every line starts with a rise from the floor to full level over 15 to 50 ms. None starts abruptly at full level, which is what a cut vowel would look like.
+- **Soft beginnings cannot be settled by measurement.** The lines beginning "s", "sh", "f", "h" and "th" show no hiss before the voice. But the recording shows almost no hiss anywhere, in the middle of lines either: one "sh" in ten lines. So the headset and the noise suppression remove most of it before the gate has a say. Whether these lines sound cut is for a listener to say. The ten lines alone are in `ten-lines-205610.wav` beside the recording.
+- **Listened to the same evening: the ten lines sound whole.** So VOX does not clip word beginnings on the headset in this noise, by ear and by the levels.
+- **The noise was louder at the microphone than in the afternoon.** By the phone's own meter over 30 seconds of noise alone, the afternoon read -59 dB at its quietest and -50 dB at its loudest. This run read -53 dB and -40 dB. The gate opens at -42 dB. So the afternoon's loudest moments were 8 dB under the gate, and this run's were 2 dB over it. That is why the gate opened once on noise alone and hung open up to 1.2 seconds after a line.
+- **The room accounts for 2 to 3 dB of that**, by a sound meter app on the phone, and it did not sound much louder. The other 4 to 7 dB is not explained: where the speaker stood, or how the headset's boom sat. An earlier figure here of 14 dB compared this run's noise just after speech with the afternoon's steady noise, which was not like for like.
+- **No tuning for now.** At 80 dB and more the noise is louder than the cockpit is while fishing, by the judgement of the person who fishes there, so the afternoon run is the nearer to the boat. The gate stays at -42 dB. The level to tune against is the real cockpit's, which the boat stages will give.
+
+## Headsets on both sides, 2026-11-19 at 21:15
+
+`latency-4`: the iPhone Air talking on the OpenComm2, the iPad listening on a Shokz OpenRun Air, both over Bluetooth. Nine claps beside the Mac. Test bench run `2026-11-19-211426` was going.
+
+| Measure | Result |
+|---|---|
+| Delay, nine claps | 273 to 304 ms, 290 ms in the middle |
+| Echoes of each clap | every 296 ms, which is the same delay going round |
+| iPad playing behind, by its own figure | 85 to 92 ms throughout |
+| iPhone's packets lost on the way | none |
+| Slowest ping to the iPad | 102 ms, once; otherwise under 20 ms |
+
+- **290 ms is over the 250 ms limit, and 35 ms more than the estimate.** The proposal's guide is that over 300 ms sounds like an echo.
+- **The difference is in how far behind the iPad was playing.** The estimate of 255 ms rested on recordings in which the listener played 44 to 67 ms behind. Here it played about 91 ms behind.
+- **That follows the talker's silence suppression.** In the afternoon's recordings the iPhone had silence suppression off. It has been on since 19:56. In three runs this evening the iPad's figure goes with how much the iPhone was sending:
+
+| Run | iPhone was | Packets from it every 2 s | iPad playing behind |
+|---|---|---|---|
+| `203521` | sending without a break | 66 | 33 ms, steady |
+| `205610` | in VOX, mostly silent | 10 | 86 ms, from 47 to 155 |
+| `211426` | in Open in a quiet room | 10 | 91 ms |
+
+- **So a talker who has been quiet is heard some 55 ms later than one who is already talking**, because while the talker sends only a packet every 200 ms the listener's player waits longer. A clap after silence, as in this recording, gets the long wait. Taking 55 ms off gives about 235 ms for someone already talking. That figure is worked out, not measured.
+- **The second headset costs about what the first does.** 188 ms without Bluetooth, less the 55 ms the iPad then played behind, plus 91 ms now, plus 35 ms for the OpenComm2, leaves about 30 ms for the OpenRun Air.
+
+## Headsets on both sides again, silence suppression off, 2026-11-19 at 21:22
+
+`latency-5`: the same as `latency-4` with one change, silence suppression switched off on the iPhone at 21:21:08. Eight claps. Test bench run `2026-11-19-212129`.
+
+| | `latency-4`, suppression on | `latency-5`, suppression off |
+|---|---|---|
+| Delay | 273 to 304 ms, 290 in the middle | 236 to 247 ms, 240 in the middle |
+| Echoes of each clap | every 296 ms | every 233 to 236 ms |
+| iPad playing behind | 85 to 92 ms | 38 to 39 ms |
+| Packets from the iPhone every 2 s | 10 | about 100 |
+| iPhone's packets lost on the way | none | none |
+| Slowest ping to either device | 102 ms, once | 17 ms |
+
+- **Confirmed: silence suppression adds about 50 ms to the start of speech after a silence.** The delay fell by 50 ms and the iPad's own figure by 53 ms, with nothing else changed.
+- **240 ms is inside the 250 ms limit, by 10 ms.** It is 15 ms under the estimate of 255 ms, because the iPad played 38 ms behind here against the 44 to 67 ms of the afternoon.
+- **This is the second reason found for leaving silence suppression off.** Stage 1 found on 2026-11-18 that a locked phone which sends without a break keeps its radio awake, and what is sent to it is no longer held up. The 30-minute run that closed Stage 1 was made with it off on both devices.
+- **What it costs is not measured.** A phone with it off sends 50 packets a second all the time it is on the boat and not muted by the track. That is more radio time and so more battery.
+
+**Decided the same evening: silence suppression is off as shipped.** The switch stays in Settings, and the test page marks a phone that has it on. The setting is kept under a new name, so both devices start from off whatever they were set to. The build is on the iPhone and the iPad. Both joined with it off, the iPhone at 21:29:14 and the iPad at 21:29:31, by their own logs. The iPad had it on before.
+
 ## Still to do
 
+- Measure what silence suppression off costs in battery, in the next long run.
+- On the boat: read the phone's own noise figures in the cockpit while fishing, and set the VOX gate against those.
 - A longer run on the new ports, as part of the next test that needs one.
-- Then one more VOX run, to listen for clipped word beginnings.
 - A recording with Bluetooth headsets on both devices, when a second headset is on hand.

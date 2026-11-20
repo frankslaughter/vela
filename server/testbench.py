@@ -676,9 +676,12 @@ class TestBench:
                 f"{p['battery_start']:.0%} to {p['battery_end']:.0%}" if p["battery_start"] is not None else "unknown"
             )
             sent_loss = f"{p['sent_loss']:.1%}" if p.get("sent_loss") is not None else "unknown"
-            if p.get("silence_suppression") is False or p.get("redundancy") is False:
-                off = [n for n, k in (("silence suppression", "silence_suppression"), ("redundancy", "redundancy")) if p.get(k) is False]
-                sent_loss += f" ({' and '.join(off)} off)"
+            # Settings that differ from the app's own: silence suppression is off as shipped, redundancy on.
+            changed = (["silence suppression on"] if p.get("silence_suppression") is True else []) + (
+                ["redundancy off"] if p.get("redundancy") is False else []
+            )
+            if changed:
+                sent_loss += f" ({' and '.join(changed)})"
             lines.append(
                 f"| {p['name']} | {'Pass' if p['passed'] else 'Fail: ' + '; '.join(p['problems'])} "
                 f"| {p['connected']:.1%} | {p['locked']:.0%} | {p['sending']:.0%} | {sent_loss} "
